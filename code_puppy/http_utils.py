@@ -5,6 +5,7 @@ This module provides functions for creating properly configured HTTP clients.
 """
 
 import asyncio
+import logging
 import os
 import socket
 import time
@@ -16,6 +17,8 @@ import httpx
 if TYPE_CHECKING:
     import requests
 from code_puppy.config import get_http2
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -338,6 +341,63 @@ def create_reopenable_async_client(
             )
         else:
             return httpx.AsyncClient(**base_kwargs)
+
+
+def disable_openai_sdk_retries(
+    http_client: httpx.AsyncClient,
+    **openai_kwargs: Any,
+) -> dict:
+    """When a RetryingAsyncClient is used as http_client for the OpenAI SDK,
+    disable the SDK's own retries to avoid multiplicative retry explosion.
+
+    The OpenAI SDK defaults to max_retries=2, and RetryingAsyncClient has 5.
+    Together with 3 streaming retries, a 429 can trigger up to
+    3 x 3 x 5 = 45 retries. Disabling SDK retries caps this at 3 x 5 = 15.
+
+    Returns provider kwargs. If the client is NOT a RetryingAsyncClient,
+    returns {"http_client": client} (+ any openai_kwargs as separate keys).
+    If it IS a RetryingAsyncClient, returns {"openai_client": AsyncOpenAI(...)}
+    with max_retries=0 and the provided openai_kwargs folded in.
+    Falls back to {"http_client": client} if AsyncOpenAI construction fails
+    (e.g. missing api_key).
+
+    Args:
+        http_client: The httpx client (possibly RetryingAsyncClient).
+        **openai_kwargs: Extra kwargs for AsyncOpenAI (api_key, base_url, etc).
+            Only used when creating an openai_client to bypass SDK retries.
+    """
+    if isinstance(http_client, RetryingAsyncClient):
+        try:
+            from openai import AsyncOpenAI
+
+            openai_client = AsyncOpenAI(
+                http_client=http_client,
+                max_retries=0,
+                **openai_kwargs,
+            )
+            return {"openai_client": openai_client}
+        except ImportError:
+            # openai package not installed; fall through
+            pass
+        except Exception as exc:
+            # Missing api_key (OpenAIError), wrong kwargs (TypeError),
+            # or other construction failures — fall back gracefully.
+            try:
+                from openai import OpenAIError as _OpenAIError
+
+                _warnable = (TypeError, ValueError, _OpenAIError)
+            except ImportError:
+                _warnable = (TypeError, ValueError)
+            if isinstance(exc, _warnable):
+                emit_warning(
+                    f"Could not disable OpenAI SDK retries ({exc}). "
+                    f"Falling back to http_client mode — multiplicative retries possible."
+                )
+            else:  # pragma: no cover
+                logger.debug("Unexpected error disabling OpenAI SDK retries: %s", exc)
+    result = {"http_client": http_client}
+    result.update(openai_kwargs)
+    return result
 
 
 def is_cert_bundle_available() -> bool:
