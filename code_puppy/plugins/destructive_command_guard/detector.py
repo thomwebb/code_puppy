@@ -1,9 +1,11 @@
 """Pattern detection for destructive shell commands.
 
 Detects dangerous patterns in shell commands using pure regex — no LLM
-calls, no caching, no yolo-mode checks. Covers rm -rf root/home,
-git push --mirror, git clean -fd, git reset --hard, git checkout/restore .,
-SQL DROP via clients, docker prune, and accidental package publishes.
+calls, no caching, no yolo-mode checks. Covers:
+- Unix/Linux: rm -rf root/home, git push --mirror, git clean -fd, git reset --hard,
+  git checkout/restore ., SQL DROP via clients, docker prune, accidental package publishes
+- Windows PowerShell: Remove-Item, rmdir, del, Format-Volume, Clear-Disk, registry operations
+- Windows CMD: rd, rmdir, del, erase with /s /q flags, format, diskpart
 """
 
 import re
@@ -48,6 +50,7 @@ def _is_real_command(command: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PREFILTER_SUBSTRINGS = (
+    # Unix/Linux
     "rm",
     "git",
     "docker",
@@ -58,18 +61,38 @@ _PREFILTER_SUBSTRINGS = (
     "psql",
     "mysql",
     "sqlite3",
+    # Windows PowerShell (cmdlets and common aliases)
+    "remove-item",
+    " ri ",
+    "ri ",
+    " rmdir",
+    "del ",
+    "erase",
+    "format-volume",
+    "clear-disk",
+    "remove-itemproperty",
+    "clear-recyclebin",
+    "invoke-expression",
+    " irm ",
+    "iex",
+    "get-childitem",
+    # Windows CMD
+    "rd ",
+    "format",
+    "diskpart",
+    "bcdedit",
+    "reg ",
+    "netsh",
 )
 
 
 # ---------------------------------------------------------------------------
-# Pattern list — ordered by specificity, first match wins
+# Pattern lists — organized by shell type
 # ---------------------------------------------------------------------------
 
-# Tier 1 — irreversible, common AI mistakes
-# Tier 2 — destructive but less common
-
-_DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
-    # ── Tier 1 ──────────────────────────────────────────────────────────
+# Unix destructive patterns
+_UNIX_DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
+    # —— Tier 1 ——————————————————————————————————————————————————————————————
     # 1. rm -rf /  /  rm -rf /*  (recursive delete of root filesystem)
     (
         re.compile(r"\brm\b.*\s-rf?\b.*\s/\s*$"),
@@ -100,7 +123,7 @@ _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     ),
     # 4. git clean -fd  (deletes untracked files and directories)
     (
-        re.compile(r"\bgit\s+clean\b.*-f\b.*[dx]"),
+        re.compile(r"\bgit\s+clean\b.*-f(?:[dxf]|\s+-?[dxf])"),
         "git clean -fd",
         "deletes untracked files and directories",
     ),
@@ -116,7 +139,7 @@ _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         "git checkout/restore .",
         "discards all working directory changes",
     ),
-    # ── Tier 2 ──────────────────────────────────────────────────────────
+    # —— Tier 2 ——————————————————————————————————————————————————————————————
     # 7. DROP TABLE/DATABASE/SCHEMA via SQL client
     (
         re.compile(
@@ -136,7 +159,9 @@ _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     ),
     # 8. docker system prune -af  /  docker volume prune -f
     (
-        re.compile(r"\bdocker\s+(?:system|volume)\s+prune\b.*\s-?[af]\b"),
+        re.compile(
+            r"\bdocker\s+(?:system|volume)\s+prune\b.*(?:-[af]|\s-[af]|\s--all)"
+        ),
         "docker prune",
         "nukes Docker resources without confirmation",
     ),
@@ -152,6 +177,173 @@ _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         "accidental package publishing",
     ),
 ]
+
+# Windows PowerShell destructive patterns
+_POWERSHELL_DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
+    # —— Tier 1 PowerShell ————————————————————————————————————————————————————
+    # 1. Remove-Item/ri with -Recurse/-r or -Force/-f flags
+    (
+        re.compile(
+            r"(?:^|[;|&])\s*(?:Remove-Item|ri)\b.*\s-(?:r|recurse|f|force)\b",
+            re.IGNORECASE,
+        ),
+        "Remove-Item with recursive/force flags",
+        "deletion with recursive or force flag",
+    ),
+    # 2. Remove-Item -Recurse -Force on system directories
+    (
+        re.compile(
+            r"\b(?:Remove-Item|ri)\b.*\s-(?:r|recurse)\b.*(?:C:|Windows|System32|Users|Program Files|ProgramData)",
+            re.IGNORECASE,
+        ),
+        "Remove-Item on system location",
+        "deletion operation on system directory or drive",
+    ),
+    # 3. Get-ChildItem piped to Remove-Item (pipeline delete)
+    (
+        re.compile(
+            r"\|\s*\b(?:Remove-Item|ri|del|erase)\b",
+            re.IGNORECASE,
+        ),
+        "Piped deletion command",
+        "deletion via pipeline (potentially recursive)",
+    ),
+    # 4. Format-Volume (disk formatting)
+    (
+        re.compile(
+            r"\b(?:Format-Volume|fdisk)\b",
+            re.IGNORECASE,
+        ),
+        "Format-Volume",
+        "formats a disk volume",
+    ),
+    # 5. Clear-Disk (wipes disk)
+    (
+        re.compile(
+            r"\bClear-Disk\b",
+            re.IGNORECASE,
+        ),
+        "Clear-Disk",
+        "removes all data and OEM recovery partitions",
+    ),
+    # 6. Remove-ItemProperty on critical registry paths
+    (
+        re.compile(
+            r"\b(?:Remove-ItemProperty|rp)\b.*\sHK(?:LM|CU|CR|U|CC):",
+            re.IGNORECASE,
+        ),
+        "Remove-ItemProperty registry",
+        "removes critical registry values",
+    ),
+    # 7. Clear-RecycleBin with -Force
+    (
+        re.compile(
+            r"\b(?:Clear-RecycleBin|recycle)\b.*\s-(?:f|force)\b",
+            re.IGNORECASE,
+        ),
+        "Clear-RecycleBin -Force",
+        "permanently deletes all recycle bin contents",
+    ),
+    # 8. Invoke-WebRequest / Invoke-RestMethod piped to IEX (remote code execution)
+    (
+        re.compile(
+            r"\b(?:irm|Invoke-WebRequest|iwr|Invoke-RestMethod|curl|wget)\b.*\|\s*(?:iex|Invoke-Expression)\b",
+            re.IGNORECASE,
+        ),
+        "Download + Execute (IWR| IEX)",
+        "downloads and executes remote code",
+    ),
+]
+
+# Windows CMD destructive patterns
+_CMD_DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
+    # —— Tier 1 CMD ———————————————————————————————————————————————————————————
+    # 1. rd /s /q - recursive silent delete
+    (
+        re.compile(
+            r"\b(?:rmdir|rd)\b.*\s/s\b.*\s/q\b",
+            re.IGNORECASE,
+        ),
+        "rd /s /q",
+        "recursive silent directory delete",
+    ),
+    (
+        re.compile(
+            r"\b(?:rmdir|rd)\b.*\s/q\b.*\s/s\b",
+            re.IGNORECASE,
+        ),
+        "rd /s /q",
+        "recursive silent directory delete",
+    ),
+    # 2. del /s /q /f on system directories
+    (
+        re.compile(
+            r"\b(?:del|erase)\b.*\s/s\b.*(?:Windows|System32|Program)",
+            re.IGNORECASE,
+        ),
+        "del /s system files",
+        "recursive delete of system files",
+    ),
+    (
+        re.compile(
+            r"\b(?:del|erase)\b.*\s/f\b.*\s/s\b.*(?:Windows|System32|Program)",
+            re.IGNORECASE,
+        ),
+        "del /f /s system files",
+        "force recursive delete of system files",
+    ),
+    # 3. format command without confirmation
+    (
+        re.compile(
+            r"(?:^|&&|\|\||;|\|)\s*format\b.*\s(?:C:|D:|E:)",
+            re.IGNORECASE,
+        ),
+        "format",
+        "formats drive",
+    ),
+    (
+        re.compile(
+            r"(?:^|&&|\|\||;|\|)\s*format\b.*\s/q\b.*\s(?:C:|D:|E:)",
+            re.IGNORECASE,
+        ),
+        "format /q",
+        "quick formats drive",
+    ),
+    # 4. diskpart invocation (almost never legitimate in automation)
+    (
+        re.compile(
+            r"\bdiskpart\b",
+            re.IGNORECASE,
+        ),
+        "diskpart",
+        "diskpart disk management tool",
+    ),
+    # 5. bcdedit (boot configuration) modifications
+    (
+        re.compile(
+            r"\bbcdedit\b.*\s/(?:delete|set|export|import|bootsequence)\b.*\s(?:{.*}|.*bootmgr|.*resume)",
+            re.IGNORECASE,
+        ),
+        "bcdedit destructive",
+        "modifies critical boot configuration",
+    ),
+    # 6. reg delete on critical keys
+    (
+        re.compile(
+            r"\breg\s+delete\b.*\sHK(?:LM|CR|CU)",
+            re.IGNORECASE,
+        ),
+        "reg delete",
+        "deletes critical registry keys",
+    ),
+]
+
+# Combine all patterns
+_DESTRUCTIVE_PATTERNS = (
+    _UNIX_DESTRUCTIVE_PATTERNS
+    + _POWERSHELL_DESTRUCTIVE_PATTERNS
+    + _CMD_DESTRUCTIVE_PATTERNS
+)
 
 
 def detect_destructive_command(command: str) -> DestructiveCommandMatch | None:
