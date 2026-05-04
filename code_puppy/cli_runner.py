@@ -47,6 +47,57 @@ from code_puppy.version_checker import default_version_mismatch_behavior
 plugins.load_plugin_callbacks()
 
 
+def _resume_session_from_path(raw_path: str) -> None:
+    """Restore agent message history from a saved .pkl session file.
+
+    Accepts any path (autosaves, contexts, somewhere weird on disk). We don't
+    care where it lives — we just decompose into (parent_dir, stem) and reuse
+    ``session_storage.load_session`` so we stay DRY.
+    """
+    from code_puppy.agents.agent_manager import get_current_agent
+    from code_puppy.messaging import emit_error, emit_success
+    from code_puppy.session_storage import load_session
+
+    session_path = Path(raw_path).expanduser().resolve()
+
+    if not session_path.exists():
+        emit_error(f"--resume: session file not found: {session_path}")
+        sys.exit(1)
+
+    if session_path.suffix != ".pkl":
+        emit_error(
+            f"--resume: expected a .pkl session file, got '{session_path.suffix}': {session_path}"
+        )
+        sys.exit(1)
+
+    try:
+        history = load_session(session_path.stem, session_path.parent)
+    except Exception as exc:
+        emit_error(f"--resume: failed to load session: {exc}")
+        sys.exit(1)
+
+    try:
+        agent = get_current_agent()
+        agent.set_message_history(history)
+    except Exception as exc:
+        emit_error(f"--resume: failed to attach history to agent: {exc}")
+        sys.exit(1)
+
+    # Rotate autosave id so we don't clobber the original file we just resumed.
+    try:
+        from code_puppy.config import rotate_autosave_id
+
+        rotate_autosave_id()
+    except Exception:
+        pass  # autosave rotation is best-effort
+
+    total_tokens = sum(agent.estimate_tokens_for_message(m) for m in history)
+    emit_success(
+        f"✅ Resumed session: {len(history)} messages ({total_tokens} tokens)\n"
+        f"📁 From: {session_path}"
+    )
+
+
 async def main():
     """Main async entry point for Code Puppy CLI."""
     parser = argparse.ArgumentParser(description="Code Puppy - A code generation agent")
@@ -80,6 +131,13 @@ async def main():
         "-m",
         type=str,
         help="Specify which model to use (e.g., --model gpt-5)",
+    )
+    parser.add_argument(
+        "--resume",
+        "-r",
+        type=str,
+        metavar="PATH",
+        help="Resume a saved session from a .pkl file (e.g. ~/.code_puppy/contexts/foo.pkl)",
     )
     parser.add_argument(
         "command", nargs="*", help="Run a single command (deprecated, use -p instead)"
@@ -281,6 +339,9 @@ async def main():
             default_version_mismatch_behavior(current_version)
 
     await callbacks.on_startup()
+
+    if args.resume:
+        _resume_session_from_path(args.resume)
 
     global shutdown_flag
     shutdown_flag = False
