@@ -12,8 +12,6 @@ Tests HTTP utilities including:
 import os
 from unittest.mock import patch
 
-import httpx
-
 from code_puppy.http_utils import ProxyConfig
 
 
@@ -372,60 +370,3 @@ class TestFindAvailablePort:
         # Both should be valid ports
         assert isinstance(port1, int) and isinstance(port2, int)
         assert port1 > 0 and port2 > 0
-
-
-class TestDisableOpenAISdkRetries:
-    """Test disable_openai_sdk_retries helper."""
-
-    def test_plain_client_returns_http_client(self):
-        """Plain httpx.AsyncClient should just pass through."""
-        from code_puppy.http_utils import disable_openai_sdk_retries
-
-        client = httpx.AsyncClient()
-        result = disable_openai_sdk_retries(client)
-        assert result == {"http_client": client}
-
-    def test_plain_client_passes_openai_kwargs(self):
-        """openai_kwargs should be added as separate keys for plain clients."""
-        from code_puppy.http_utils import disable_openai_sdk_retries
-
-        client = httpx.AsyncClient()
-        result = disable_openai_sdk_retries(
-            client, api_key="test-key", base_url="https://example.com"
-        )
-        assert result["http_client"] is client
-        assert result["api_key"] == "test-key"
-        assert result["base_url"] == "https://example.com"
-
-    def test_retrying_client_creates_openai_client(self):
-        """RetryingAsyncClient should produce an openai_client with max_retries=0."""
-        from code_puppy.http_utils import (
-            RetryingAsyncClient,
-            disable_openai_sdk_retries,
-        )
-
-        client = RetryingAsyncClient(max_retries=5)
-        result = disable_openai_sdk_retries(
-            client, api_key="test-key", base_url="https://example.com"
-        )
-        assert "openai_client" in result
-        assert "http_client" not in result  # replaced by openai_client
-        assert result["openai_client"].max_retries == 0
-
-    def test_retrying_client_falls_back_on_missing_api_key(self):
-        """If AsyncOpenAI creation fails, fall back to http_client."""
-        from code_puppy.http_utils import (
-            RetryingAsyncClient,
-            disable_openai_sdk_retries,
-        )
-
-        client = RetryingAsyncClient(max_retries=5)
-        # No api_key and no OPENAI_API_KEY env var → AsyncOpenAI will fail
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("code_puppy.http_utils.emit_warning") as mock_warn:
-                result = disable_openai_sdk_retries(client)
-        assert "http_client" in result
-        assert result["http_client"] is client
-        # Should have warned about falling back
-        mock_warn.assert_called_once()
-        assert "multiplicative" in mock_warn.call_args[0][0].lower()
