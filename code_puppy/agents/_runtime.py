@@ -61,6 +61,7 @@ from code_puppy.agents._non_streaming_render import (
 )
 from code_puppy.agents.event_stream_handler import event_stream_handler
 from code_puppy.callbacks import (
+    on_agent_exception,
     on_agent_run_cancel,
     on_agent_run_context,
     on_agent_run_end,
@@ -327,7 +328,30 @@ async def run_with_mcp(
                 **kwargs,
             )
 
-        result = await _call()
+        async def _call_with_exception_recovery() -> Any:
+            """Run ``_call`` and let plugins request one exception retry."""
+            try:
+                return await _call()
+            except Exception as exc:
+                hook_results = await on_agent_exception(
+                    exc,
+                    agent=agent,
+                    agent_name=agent.name,
+                    model_name=agent.get_model_name(),
+                )
+                retry_req = next(
+                    (r for r in hook_results if isinstance(r, dict) and r.get("retry")),
+                    None,
+                )
+                if not retry_req:
+                    raise
+
+                retry_delay = retry_req.get("delay", 0.0)
+                if retry_delay:
+                    await asyncio.sleep(retry_delay)
+                return await _call()
+
+        result = await _call_with_exception_recovery()
 
         for _ in range(get_max_hook_retries()):
             hook_results = await on_agent_run_result(
