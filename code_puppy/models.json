@@ -106,7 +106,18 @@
       "url": "https://pass.wafer.ai/v1",
       "api_key": "$WAFER_API_KEY"
     },
-    "context_length": 262144,
+    "context_length": 1000000,
+    "supported_settings": ["temperature", "seed", "top_p", "max_tokens"]
+  },
+  "wafer-MiniMax-M2.7": {
+    "type": "custom_openai",
+    "provider": "wafer",
+    "name": "MiniMax-M2.7",
+    "custom_endpoint": {
+      "url": "https://pass.wafer.ai/v1",
+      "api_key": "$WAFER_API_KEY"
+    },
+    "context_length": 204800,
     "supported_settings": ["temperature", "seed", "top_p", "max_tokens"]
   },
   "firepass-kimi-k2p5-turbo": {
