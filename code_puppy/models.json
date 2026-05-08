@@ -136,7 +136,7 @@
     "provider": "crof",
     "name": "kimi-k2.5-lightning",
     "custom_endpoint": {
-      "url": "https://api.crof.ai/v1",
+      "url": "https://crof.ai/v1",
       "api_key": "$CROF_API_KEY"
     },
     "context_length": 131072,
