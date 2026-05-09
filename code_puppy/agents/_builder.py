@@ -79,20 +79,144 @@ def load_puppy_rules() -> Optional[str]:
 
 def load_mcp_servers(
     extra_headers: Optional[Dict[str, str]] = None,
+    agent_name: Optional[str] = None,
 ) -> List[Any]:
-    """Return pydantic-ai compatible MCP servers, or ``[]`` if disabled."""
+    """Return pydantic-ai compatible MCP servers, or ``[]`` if disabled.
+
+    When ``agent_name`` is provided, only servers bound to that agent (via
+    ``mcp_agent_bindings.json``) are returned. Servers marked ``auto_start``
+    in their binding are kicked off in the background here so they're warm
+    by the time the agent runs.
+    """
     del extra_headers  # accepted for API compatibility; manager owns headers
     mcp_disabled = get_value("disable_mcp_servers")
     if mcp_disabled and str(mcp_disabled).lower() in ("1", "true", "yes", "on"):
         return []
-    return get_mcp_manager().get_servers_for_agent()
+
+    manager = get_mcp_manager()
+    if agent_name:
+        _autostart_bound_servers(manager, agent_name)
+    return manager.get_servers_for_agent(agent_name=agent_name)
 
 
-def reload_mcp_servers() -> List[Any]:
+def _iter_autostart_targets(manager: Any, agent_name: str):
+    """Yield ``(server_name, config)`` tuples that need to be auto-started.
+
+    Walks the bindings for ``agent_name``, filters to ``auto_start=True``,
+    skips servers that are already running/starting, and skips bindings
+    whose server config has been deleted.
+
+    Side effect: emits a one-shot warning per missing server so a user who
+    copied a JSON sub-agent config from elsewhere isn't left wondering why
+    its tools silently disappeared. Warnings are deduped via
+    ``_warn_missing_server`` so a long-running session doesn't spam the
+    same message every invocation.
+    """
+    try:
+        from code_puppy.mcp_.agent_bindings import get_bound_servers
+        from code_puppy.mcp_.managed_server import ServerState
+    except Exception:  # pragma: no cover - defensive import
+        return
+
+    bindings = get_bound_servers(agent_name)
+    if not bindings:
+        return
+
+    for server_name, opts in bindings.items():
+        if not opts.get("auto_start"):
+            continue
+        config = manager.get_server_by_name(server_name)
+        if config is None:
+            _warn_missing_server(agent_name, server_name)
+            continue
+        try:
+            status = manager.get_server_status(config.id)
+            state = status.get("state")
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if state in (ServerState.RUNNING.value, ServerState.STARTING.value):
+            continue
+        yield server_name, config
+
+
+# Module-level dedupe set: ``(agent_name, server_name)`` pairs we've already
+# warned about. We don't bother with TTLs — a fresh process resets it, which
+# matches "warn at most once per session per missing binding". Cleared in
+# tests via ``_reset_missing_warning_cache``.
+_WARNED_MISSING: set[tuple[str, str]] = set()
+
+
+def _warn_missing_server(agent_name: str, server_name: str) -> None:
+    """Warn once that an agent declares an MCP server that isn't installed."""
+    key = (agent_name, server_name)
+    if key in _WARNED_MISSING:
+        return
+    _WARNED_MISSING.add(key)
+    emit_warning(
+        f"Agent '{agent_name}' declares MCP server '{server_name}' but it's "
+        f"not installed. Run `/mcp install` to add it, or remove the entry "
+        f"from the agent's JSON config."
+    )
+
+
+def _reset_missing_warning_cache() -> None:
+    """Clear the warn-once cache. Test hook only."""
+    _WARNED_MISSING.clear()
+
+
+def _autostart_bound_servers(manager: Any, agent_name: str) -> None:
+    """Start any stopped servers bound to ``agent_name`` with auto_start=True.
+
+    Fire-and-forget: schedules the start via ``start_server_sync`` and returns
+    immediately. **The server is NOT guaranteed to be ready** when this
+    returns — it just kicks off a background task. Safe for the main agent
+    boot path because there's plenty of wall-clock time before the first
+    ``agent.run()``. **Not safe** for callers that immediately spin up a
+    pydantic-ai agent against the same MCP singleton in a different task
+    (e.g. ``invoke_agent`` wrapping ``temp_agent.run`` in
+    ``asyncio.create_task``) — those should use
+    :func:`autostart_bound_servers_async` instead, which awaits readiness so
+    pydantic-ai's re-entry hits the refcount fast-path and never creates a
+    competing cancel scope.
+    """
+    for server_name, config in _iter_autostart_targets(manager, agent_name):
+        try:
+            manager.start_server_sync(config.id)
+            emit_info(
+                f"Auto-started MCP server '{server_name}' for agent '{agent_name}'"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            emit_warning(f"Auto-start failed for MCP server '{server_name}': {exc}")
+
+
+async def autostart_bound_servers_async(manager: Any, agent_name: str) -> None:
+    """Async variant of :func:`_autostart_bound_servers` that waits for ready.
+
+    Calls ``manager.start_server`` (the async API) and awaits it, so when
+    this coroutine returns the lifecycle task has finished entering the
+    pydantic-ai MCP singleton's context. A subsequent re-entry from
+    pydantic-ai inside ``agent.run()`` will see ``_running_count > 0`` and
+    take the no-op fast-path, avoiding the cross-task cancel-scope crash.
+
+    Use this from any async caller that's about to immediately invoke a
+    pydantic-ai agent against the same MCP servers (sub-agent invocation,
+    notably).
+    """
+    for server_name, config in _iter_autostart_targets(manager, agent_name):
+        try:
+            await manager.start_server(config.id)
+            emit_info(
+                f"Auto-started MCP server '{server_name}' for agent '{agent_name}'"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            emit_warning(f"Auto-start failed for MCP server '{server_name}': {exc}")
+
+
+def reload_mcp_servers(agent_name: Optional[str] = None) -> List[Any]:
     """Force re-sync from ``mcp_servers.json`` and return updated servers."""
     manager = get_mcp_manager()
     manager.sync_from_config()
-    return manager.get_servers_for_agent()
+    return manager.get_servers_for_agent(agent_name=agent_name)
 
 
 def load_model_with_fallback(
@@ -240,7 +364,7 @@ def build_pydantic_agent(
         agent.get_model_name(), models_config, message_group
     )
     instructions = _assemble_instructions(agent, resolved_model_name)
-    mcp_servers = load_mcp_servers()
+    mcp_servers = load_mcp_servers(agent_name=getattr(agent, "name", None))
     model_settings = make_model_settings(resolved_model_name)
     history_processor = make_history_processor(agent)
 
