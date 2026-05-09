@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import sys
 from typing import Any
@@ -21,8 +20,6 @@ from .models import (
     QuestionAnswer,
 )
 from .terminal_ui import CancelledException, interactive_question_picker
-
-logger = logging.getLogger(__name__)
 
 
 class AsyncContextError(RuntimeError):
@@ -95,11 +92,8 @@ def ask_user_question(
         >>> print(result.answers[0].selected_options)
         ['PostgreSQL']
     """
-    logger.info("ask_user_question called with %d questions", len(questions))
-
     # Block interactive tools in sub-agent context
     if is_subagent():
-        logger.warning("ask_user_question called from sub-agent context - disabled")
         return AskUserQuestionOutput.error_response(
             "Interactive tools are disabled for sub-agents. "
             "Sub-agents should make reasonable decisions or return to the parent agent "
@@ -108,7 +102,6 @@ def ask_user_question(
 
     # Block interactive tools in wiggum (autonomous loop) mode
     if is_wiggum_active():
-        logger.warning("ask_user_question called during wiggum mode - disabled")
         return AskUserQuestionOutput.error_response(
             "Interactive tools are disabled during /wiggum mode. "
             "The agent is running autonomously in a loop. "
@@ -118,7 +111,6 @@ def ask_user_question(
 
     # Check for interactive environment
     if not is_interactive():
-        logger.warning("Non-interactive environment detected")
         return AskUserQuestionOutput.error_response(
             "Cannot ask questions: not running in an interactive terminal. "
             "Please provide configuration through arguments or config files."
@@ -129,10 +121,8 @@ def ask_user_question(
         validated_input = _validate_input(questions)
     except ValidationError as e:
         error_msg = _format_validation_error(e)
-        logger.warning("Validation error: %s", error_msg)
         return AskUserQuestionOutput.error_response(error_msg)
     except (TypeError, ValueError) as e:
-        logger.error("Unexpected validation error: %s", e, exc_info=True)
         return AskUserQuestionOutput.error_response(f"Validation error: {e!s}")
 
     # Run the interactive TUI
@@ -142,22 +132,17 @@ def ask_user_question(
         )
 
         if timed_out:
-            logger.info("Interaction timed out after %d seconds", timeout)
             return AskUserQuestionOutput.timeout_response(timeout)
 
         if cancelled:
-            logger.info("User cancelled the interaction")
             return _cancelled_response()
 
-        logger.info("Successfully collected %d answers", len(answers))
         return AskUserQuestionOutput(answers=answers)
 
     except (CancelledException, KeyboardInterrupt):
-        logger.info("User cancelled the interaction")
         return _cancelled_response()
 
     except OSError as e:
-        logger.error("Unexpected error during interaction: %s", e)
         return AskUserQuestionOutput.error_response(f"Interaction error: {e!s}")
 
 

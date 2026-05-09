@@ -414,8 +414,20 @@ async def run_with_mcp(
                 group_id=group_id,
             )
         except* mcp.shared.exceptions.McpError as mcp_error:
-            emit_info(f"MCP server error: {mcp_error}", group_id=group_id)
-            emit_info("Try disabling any malfunctioning MCP servers", group_id=group_id)
+            # Already announced once by blocking_startup.py with a /mcp logs
+            # hint. Don't re-vomit the exception text — just give the user
+            # a single short, actionable nudge.
+            emit_info(
+                "An MCP server failed during this run. "
+                "Run [cyan]/mcp logs <name>[/cyan] for details, or unbind it "
+                "via [cyan]/agents → B[/cyan].",
+                group_id=group_id,
+            )
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug(
+                "McpError during agent run: %s", mcp_error
+            )
         except* asyncio.CancelledError:
             emit_info("Cancelled")
             await on_agent_run_cancel(group_id)
