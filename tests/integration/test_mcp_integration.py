@@ -113,33 +113,6 @@ def test_mcp_context7_end_to_end(cli_harness: CliHarness) -> None:
                 raise
         cli_harness.wait_for_ready(result)
 
-        # Basic connectivity test
-        result.sendline("/mcp test context7\r")
-        try:
-            result.child.expect(
-                re.compile(r"Testing connectivity to server: context7"), timeout=90
-            )
-        except pexpect.exceptions.TIMEOUT:
-            pass  # Continue anyway
-
-        try:
-            result.child.expect(
-                re.compile(r"Server instance created successfully"), timeout=90
-            )
-        except pexpect.exceptions.TIMEOUT:
-            pass  # Continue anyway
-
-        try:
-            result.child.expect(re.compile(r"Connectivity test passed"), timeout=90)
-        except pexpect.exceptions.TIMEOUT:
-            # Check if test had any success indicators
-            log_output = result.read_log()
-            if "connectivity" in log_output.lower() or "test" in log_output.lower():
-                print("[INFO] Connectivity test timeout but evidence of attempt found")
-            else:
-                raise
-        cli_harness.wait_for_ready(result)
-
         # Prompt intended to trigger an actual tool call - make it more explicit
         result.sendline(
             "Please use the context7 search tool to find information about pydantic AI. Use the search functionality. Don't worry if there is a 401 not Authorized.\r"

@@ -43,8 +43,9 @@ class TestMCPCompleter:
         result = self._get_completions("/mcp ")
         names = [c.text for c in result]
         assert "start" in names
-        assert "list" in names
         assert "install" in names
+        # "list" is intentionally not offered: bare /mcp already does that.
+        assert "list" not in names
 
     def test_partial_subcommand(self):
         result = self._get_completions("/mcp st")
