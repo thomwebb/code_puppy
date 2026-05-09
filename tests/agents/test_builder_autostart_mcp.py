@@ -352,5 +352,146 @@ class TestSubagentInvocationUsesAsyncAutostart:
         )
 
 
+class TestPreMcpAutostartHook:
+    """The ``pre_mcp_autostart`` callback fires once per autostart batch,
+    before any ``manager.start_server`` call, with the agent name and the
+    list of server names that are about to start. Plugins use this to
+    refresh tokens / mint creds without monkey-patching ``start_server``.
+    """
+
+    def test_sync_fires_hook_with_agent_and_server_names(self, mock_manager):
+        mock_manager.get_server_status.return_value = {
+            "state": ServerState.STOPPED.value
+        }
+        with (
+            patch(
+                "code_puppy.mcp_.agent_bindings.get_bound_servers",
+                return_value={"srv-1": {"auto_start": True}},
+            ),
+            patch("code_puppy.agents._builder.on_pre_mcp_autostart_sync") as mock_hook,
+        ):
+            _builder._autostart_bound_servers(mock_manager, "code-puppy")
+        mock_hook.assert_called_once_with("code-puppy", ["srv-1"])
+
+    @pytest.mark.asyncio
+    async def test_async_fires_hook_with_agent_and_server_names(self, mock_manager):
+        mock_manager.get_server_status.return_value = {
+            "state": ServerState.STOPPED.value
+        }
+
+        async def _ok(_id):
+            return None
+
+        mock_manager.start_server.side_effect = _ok
+
+        with (
+            patch(
+                "code_puppy.mcp_.agent_bindings.get_bound_servers",
+                return_value={"srv-1": {"auto_start": True}},
+            ),
+            patch(
+                "code_puppy.agents._builder.on_pre_mcp_autostart",
+            ) as mock_hook,
+        ):
+
+            async def _async_ok(*_a, **_kw):
+                return []
+
+            mock_hook.side_effect = _async_ok
+            await _builder.autostart_bound_servers_async(mock_manager, "code-puppy")
+        mock_hook.assert_called_once_with("code-puppy", ["srv-1"])
+
+    def test_hook_fires_before_start_server(self, mock_manager):
+        """Order matters: hook must fire BEFORE any start_server call so
+        plugins can refresh credentials in time."""
+        mock_manager.get_server_status.return_value = {
+            "state": ServerState.STOPPED.value
+        }
+        order: list[str] = []
+
+        def _hook(_agent, _names):
+            order.append("hook")
+
+        mock_manager.start_server_sync.side_effect = lambda _id: order.append("start")
+
+        from code_puppy.callbacks import (
+            register_callback,
+            unregister_callback,
+        )
+
+        register_callback("pre_mcp_autostart", _hook)
+        try:
+            with patch(
+                "code_puppy.mcp_.agent_bindings.get_bound_servers",
+                return_value={"srv-1": {"auto_start": True}},
+            ):
+                _builder._autostart_bound_servers(mock_manager, "code-puppy")
+        finally:
+            unregister_callback("pre_mcp_autostart", _hook)
+
+        assert order == ["hook", "start"]
+
+    def test_hook_not_fired_when_no_targets(self, mock_manager):
+        """If nothing's going to autostart, don't bother plugins."""
+        with (
+            patch(
+                "code_puppy.mcp_.agent_bindings.get_bound_servers",
+                return_value={"srv-1": {"auto_start": False}},
+            ),
+            patch("code_puppy.agents._builder.on_pre_mcp_autostart_sync") as mock_hook,
+        ):
+            _builder._autostart_bound_servers(mock_manager, "code-puppy")
+        mock_hook.assert_not_called()
+
+    def test_hook_exception_does_not_abort_autostart(self, mock_manager):
+        """A misbehaving plugin must not block servers from starting."""
+        mock_manager.get_server_status.return_value = {
+            "state": ServerState.STOPPED.value
+        }
+
+        def _bad_hook(_agent, _names):
+            raise RuntimeError("plugin broke")
+
+        from code_puppy.callbacks import (
+            register_callback,
+            unregister_callback,
+        )
+
+        register_callback("pre_mcp_autostart", _bad_hook)
+        try:
+            with patch(
+                "code_puppy.mcp_.agent_bindings.get_bound_servers",
+                return_value={"srv-1": {"auto_start": True}},
+            ):
+                _builder._autostart_bound_servers(mock_manager, "code-puppy")
+        finally:
+            unregister_callback("pre_mcp_autostart", _bad_hook)
+
+        # Server still starts even though hook raised.
+        mock_manager.start_server_sync.assert_called_once_with("srv-1")
+
+    def test_hook_receives_only_autostart_servers(self, mock_manager):
+        """Servers with ``auto_start=False`` must not appear in the hook's
+        server_names list — plugins decide work based on this."""
+        mock_manager.get_server_status.return_value = {
+            "state": ServerState.STOPPED.value
+        }
+        with (
+            patch(
+                "code_puppy.mcp_.agent_bindings.get_bound_servers",
+                return_value={
+                    "srv-yes": {"auto_start": True},
+                    "srv-no": {"auto_start": False},
+                },
+            ),
+            patch("code_puppy.agents._builder.on_pre_mcp_autostart_sync") as mock_hook,
+        ):
+            _builder._autostart_bound_servers(mock_manager, "code-puppy")
+        mock_hook.assert_called_once()
+        agent_arg, names_arg = mock_hook.call_args.args
+        assert agent_arg == "code-puppy"
+        assert names_arg == ["srv-yes"]
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
