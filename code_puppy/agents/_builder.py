@@ -20,7 +20,11 @@ from rich.text import Text
 
 from code_puppy.agents._compaction import make_history_processor
 from code_puppy.agents.event_stream_handler import event_stream_handler
-from code_puppy.callbacks import on_wrap_pydantic_agent
+from code_puppy.callbacks import (
+    on_pre_mcp_autostart,
+    on_pre_mcp_autostart_sync,
+    on_wrap_pydantic_agent,
+)
 from code_puppy.config import (
     CONFIG_DIR,
     get_global_model_name,
@@ -179,7 +183,11 @@ def _autostart_bound_servers(manager: Any, agent_name: str) -> None:
     pydantic-ai's re-entry hits the refcount fast-path and never creates a
     competing cancel scope.
     """
-    for server_name, config in _iter_autostart_targets(manager, agent_name):
+    targets = list(_iter_autostart_targets(manager, agent_name))
+    if not targets:
+        return
+    on_pre_mcp_autostart_sync(agent_name, [name for name, _ in targets])
+    for server_name, config in targets:
         try:
             manager.start_server_sync(config.id)
             emit_info(
@@ -202,7 +210,11 @@ async def autostart_bound_servers_async(manager: Any, agent_name: str) -> None:
     pydantic-ai agent against the same MCP servers (sub-agent invocation,
     notably).
     """
-    for server_name, config in _iter_autostart_targets(manager, agent_name):
+    targets = list(_iter_autostart_targets(manager, agent_name))
+    if not targets:
+        return
+    await on_pre_mcp_autostart(agent_name, [name for name, _ in targets])
+    for server_name, config in targets:
         try:
             await manager.start_server(config.id)
             emit_info(

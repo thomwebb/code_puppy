@@ -43,6 +43,7 @@ PhaseType = Literal[
     "agent_run_context",
     "agent_run_cancel",
     "should_skip_fallback_render",
+    "pre_mcp_autostart",
 ]
 CallbackFunc = Callable[..., Any]
 
@@ -86,6 +87,7 @@ _callbacks: Dict[PhaseType, List[CallbackFunc]] = {
     "agent_run_context": [],
     "agent_run_cancel": [],
     "should_skip_fallback_render": [],
+    "pre_mcp_autostart": [],
 }
 
 logger = logging.getLogger(__name__)
@@ -672,6 +674,31 @@ def on_register_mcp_catalog_servers() -> List[Any]:
         List of results from all registered callbacks (each should be a list of MCPServerTemplate).
     """
     return _trigger_callbacks_sync("register_mcp_catalog_servers")
+
+
+async def on_pre_mcp_autostart(agent_name: str, server_names: List[str]) -> List[Any]:
+    """Fire ``pre_mcp_autostart`` callbacks before bound MCP servers auto-start.
+
+    Plugins use this to refresh tokens, mint credentials, or do any other
+    one-shot prep work *before* the autostart loop calls
+    ``manager.start_server`` on each bound server. Errors in callbacks are
+    logged but do **not** abort autostart (matches existing convention).
+
+    Args:
+        agent_name: The agent whose bindings are about to be auto-started.
+        server_names: Names of servers (with ``auto_start=True``) about to start.
+            Lets the plugin short-circuit if it has nothing to do.
+    """
+    return await _trigger_callbacks("pre_mcp_autostart", agent_name, server_names)
+
+
+def on_pre_mcp_autostart_sync(agent_name: str, server_names: List[str]) -> List[Any]:
+    """Sync variant of :func:`on_pre_mcp_autostart` for non-async callers.
+
+    Coroutine callbacks are still awaited via ``asyncio.run`` when no loop
+    is currently running (see ``_trigger_callbacks_sync``).
+    """
+    return _trigger_callbacks_sync("pre_mcp_autostart", agent_name, server_names)
 
 
 def on_register_browser_types() -> List[Any]:
