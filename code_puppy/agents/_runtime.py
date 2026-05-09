@@ -76,7 +76,6 @@ from code_puppy.config import (
 )
 from code_puppy.keymap import cancel_agent_uses_signal
 from code_puppy.messaging import emit_error, emit_info, emit_warning
-from code_puppy.model_factory import ModelFactory
 from code_puppy.tools.agent_tools import _active_subagent_tasks
 from code_puppy.tools.command_runner import is_awaiting_user_input
 
@@ -189,22 +188,6 @@ def streaming_retry(
 
 
 # ---- Small utilities --------------------------------------------------------
-
-
-def _model_allows_streaming(model_name: Optional[str]) -> bool:
-    """Check the model config for an explicit ``"streaming": false`` override.
-
-    Some providers (e.g. crof.ai for kimi models) have flaky SSE transports.
-    Setting ``"streaming": false`` in ``models.json`` disables streaming for
-    that model, falling back to a single-shot request like gac does.
-    """
-    if not model_name:
-        return True
-    try:
-        cfg = ModelFactory.load_config().get(model_name, {})
-        return cfg.get("streaming", True) is not False
-    except Exception:
-        return True
 
 
 def _sanitize_prompt(prompt: str) -> str:
@@ -326,29 +309,11 @@ async def run_with_mcp(
         # never install the stream handler at all and always render from the
         # final result. When it's enabled we wrap the handler in a detector
         # and fall back to a one-shot render only if no text actually streamed.
-        #
-        # Model-level override: models with ``"streaming": false`` in
-        # models.json always use non-streaming requests (e.g. kimi-k2.5
-        # via crof.ai whose SSE transport is flaky).
-        use_streaming = get_enable_streaming() and _model_allows_streaming(
-            agent.get_model_name()
-        )
+        use_streaming = get_enable_streaming()
         detector: Optional[StreamingTextDetector] = (
             StreamingTextDetector(event_stream_handler) if use_streaming else None
         )
         stream_handler = detector if detector is not None else None
-        # When streaming is disabled we must also clear the handler stored on
-        # the pydantic agent itself.  DBOSAgent (and potentially other
-        # wrappers) bake ``event_stream_handler`` into the agent at build
-        # time; passing ``None`` to ``.run()`` isn't enough because pydantic-ai
-        # falls back via ``event_stream_handler or self.event_stream_handler``.
-        # Nuking ``_event_stream_handler`` forces the property to return
-        # ``None``, which makes pydantic-ai use the non-streaming
-        # ``model.request()`` path instead of ``request_stream()``.
-        _saved_handler: Any = None
-        if not use_streaming:
-            _saved_handler = getattr(pydantic_agent, "_event_stream_handler", None)
-            pydantic_agent._event_stream_handler = None
         # Plugins (e.g. DBOS) can render their own output and ask us to skip
         # the non-streaming fallback render.
         skip_fallback_render = on_should_skip_fallback_render(agent)
@@ -387,10 +352,6 @@ async def run_with_mcp(
                 return await _call()
 
         result = await _call_with_exception_recovery()
-
-        # Restore the handler we cleared (non-streaming models).
-        if _saved_handler is not None or not use_streaming:
-            pydantic_agent._event_stream_handler = _saved_handler
 
         for _ in range(get_max_hook_retries()):
             hook_results = await on_agent_run_result(

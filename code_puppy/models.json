@@ -151,8 +151,6 @@
       "api_key": "$CROF_API_KEY"
     },
     "context_length": 131072,
-    "streaming": false,
-    "strict_tools": false,
     "supported_settings": ["temperature", "seed", "top_p"]
   },
   "zai-glm-5-coding": {

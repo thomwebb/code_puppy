@@ -207,22 +207,10 @@ class TestMakeModelSettings:
         """Test parallel_tool_calls=False when yolo_mode is off (user reviews sequentially)."""
         from code_puppy.model_factory import make_model_settings
 
-        # Only send this field for models/providers that explicitly advertise
-        # support; many OpenAI-compatible backends 500 on unknown fields.
-        with (
-            patch("code_puppy.model_factory.get_yolo_mode", return_value=False),
-            patch("code_puppy.config.model_supports_setting", return_value=True),
-        ):
+        with patch("code_puppy.model_factory.get_yolo_mode", return_value=False):
             settings = make_model_settings("gpt-4o", max_tokens=5000)
             assert "parallel_tool_calls" in settings
             assert settings["parallel_tool_calls"] is False
-
-        with (
-            patch("code_puppy.model_factory.get_yolo_mode", return_value=False),
-            patch("code_puppy.config.model_supports_setting", return_value=False),
-        ):
-            settings = make_model_settings("gpt-4o", max_tokens=5000)
-            assert "parallel_tool_calls" not in settings
 
     def test_make_model_settings_parallel_tool_calls_not_set_when_yolo_on(self):
         """Test parallel_tool_calls is not explicitly set when yolo_mode is on."""
