@@ -53,6 +53,21 @@ def _generate_session_hash_suffix() -> str:
     return hashlib.sha1(timestamp.encode()).hexdigest()[:6]
 
 
+def _sanitize_for_session_id(value: str) -> str:
+    """Coerce an arbitrary string into kebab-case suitable for a session_id.
+
+    Lowercases everything, replaces any non ``[a-z0-9]`` runs with a single
+    hyphen, and strips leading/trailing hyphens.  This lets us safely embed
+    agent names like ``"LPZ-Main-Coder"`` or ``"My_Agent"`` into auto-
+    generated session IDs without tripping the kebab-case validator.
+    """
+    lowered = value.lower()
+    # Replace any run of disallowed chars with a single hyphen
+    cleaned = re.sub(r"[^a-z0-9]+", "-", lowered)
+    # Strip leading/trailing hyphens
+    return cleaned.strip("-")
+
+
 # Regex pattern for kebab-case session IDs
 SESSION_ID_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SESSION_ID_MAX_LENGTH = 128
@@ -314,13 +329,19 @@ def register_invoke_agent(agent):
         if session_id is None:
             # Auto-generate a session ID with hash suffix for uniqueness
             # Example: "qa-expert-session-a3f2b1"
+            # Sanitize agent_name to kebab-case so capitalised names like
+            # "LPZ-Main-Coder" don't produce invalid session IDs.
             hash_suffix = _generate_session_hash_suffix()
-            session_id = f"{agent_name}-session-{hash_suffix}"
+            safe_agent_name = _sanitize_for_session_id(agent_name) or "agent"
+            session_id = f"{safe_agent_name}-session-{hash_suffix}"
         elif is_new_session:
             # User provided a base name for a NEW session - append hash suffix
             # Example: "review-auth" -> "review-auth-a3f2b1"
+            # Sanitize the user-provided base to be forgiving of casing/
+            # underscores while still producing a valid kebab-case ID.
             hash_suffix = _generate_session_hash_suffix()
-            session_id = f"{session_id}-{hash_suffix}"
+            safe_base = _sanitize_for_session_id(session_id) or "session"
+            session_id = f"{safe_base}-{hash_suffix}"
         # else: continuing existing session, use session_id as-is
 
         # Lazy imports to avoid circular dependency
