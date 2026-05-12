@@ -448,8 +448,11 @@ async def run_with_mcp(
                 agent._message_history
             )
 
-    agent_task = asyncio.create_task(run_agent_task())
-
+    # Fire agent_run_start hooks BEFORE creating the agent task so plugins
+    # (e.g. token refresh, credential minting) can complete their work before
+    # any HTTP request leaves the building. Otherwise the ``await`` would
+    # yield control to the event loop and the agent task would race ahead
+    # with stale credentials. See issue #338.
     try:
         await on_agent_run_start(
             agent_name=agent.name,
@@ -459,6 +462,8 @@ async def run_with_mcp(
     except Exception:
         # Hook failures never block the agent.
         pass
+
+    agent_task = asyncio.create_task(run_agent_task())
 
     loop = asyncio.get_running_loop()
 
