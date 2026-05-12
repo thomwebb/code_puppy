@@ -1543,6 +1543,8 @@ DEFAULT_BANNER_COLORS = {
     "mcp_tool_call": "dark_cyan",  # Teal - external MCP tool calls
     # User-initiated shell pass-through (! prefix) - distinct from agent's shell_command
     "shell_passthrough": "medium_sea_green",  # Green - user's own shell commands
+    # LLM Judge - goal-mode verdict (distinct from agent reasoning)
+    "llm_judge": "gold3",  # Gold - judicial authority / gavel
 }
 
 

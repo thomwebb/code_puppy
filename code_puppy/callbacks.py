@@ -44,6 +44,8 @@ PhaseType = Literal[
     "agent_run_cancel",
     "should_skip_fallback_render",
     "pre_mcp_autostart",
+    "interactive_turn_end",
+    "interactive_turn_cancel",
 ]
 CallbackFunc = Callable[..., Any]
 
@@ -88,6 +90,8 @@ _callbacks: Dict[PhaseType, List[CallbackFunc]] = {
     "agent_run_cancel": [],
     "should_skip_fallback_render": [],
     "pre_mcp_autostart": [],
+    "interactive_turn_end": [],
+    "interactive_turn_cancel": [],
 }
 
 logger = logging.getLogger(__name__)
@@ -886,3 +890,40 @@ def on_should_skip_fallback_render(agent) -> bool:
     """Return True if any plugin requests skipping the non-streaming fallback render."""
     results = _trigger_callbacks_sync("should_skip_fallback_render", agent)
     return any(r is True for r in results)
+
+
+async def on_interactive_turn_end(
+    agent,
+    prompt: str,
+    result: Any = None,
+    *,
+    success: bool = True,
+    error: Optional[BaseException] = None,
+) -> List[Any]:
+    """Fired after an interactive prompt run completes.
+
+    Plugins may return a continuation request dict, for example::
+
+        {"prompt": "retry the task", "clear_context": True, "delay": 0.5}
+
+    The CLI owns execution; plugins own policy. Nice and not-gross.
+    """
+    return await _trigger_callbacks(
+        "interactive_turn_end",
+        agent,
+        prompt,
+        result,
+        success=success,
+        error=error,
+    )
+
+
+async def on_interactive_turn_cancel(
+    prompt: str, *, reason: str = "cancelled"
+) -> List[Any]:
+    """Fired when the active interactive prompt/loop is cancelled."""
+    return await _trigger_callbacks(
+        "interactive_turn_cancel",
+        prompt,
+        reason=reason,
+    )

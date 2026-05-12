@@ -656,21 +656,25 @@ class TestHandleGeneratePrDescription:
 
 class TestHandleWiggumCommand:
     def test_no_prompt(self):
-        from code_puppy.command_line.core_commands import handle_wiggum_command
+        from code_puppy.plugins.wiggum.register_callbacks import (
+            handle_wiggum_command,
+        )
 
         with (
-            patch("code_puppy.messaging.emit_warning"),
-            patch("code_puppy.messaging.emit_info"),
+            patch("code_puppy.plugins.wiggum.register_callbacks.emit_warning"),
+            patch("code_puppy.plugins.wiggum.register_callbacks.emit_info"),
         ):
             assert handle_wiggum_command("/wiggum") is True
 
     def test_with_prompt(self):
-        from code_puppy.command_line.core_commands import handle_wiggum_command
+        from code_puppy.plugins.wiggum.register_callbacks import (
+            handle_wiggum_command,
+        )
 
         with (
-            patch("code_puppy.command_line.wiggum_state.start_wiggum"),
-            patch("code_puppy.messaging.emit_success"),
-            patch("code_puppy.messaging.emit_info"),
+            patch("code_puppy.plugins.wiggum.state.start"),
+            patch("code_puppy.plugins.wiggum.register_callbacks.emit_success"),
+            patch("code_puppy.plugins.wiggum.register_callbacks.emit_info"),
         ):
             result = handle_wiggum_command("/wiggum say hello")
             assert result == "say hello"
@@ -678,27 +682,31 @@ class TestHandleWiggumCommand:
 
 class TestHandleWiggumStopCommand:
     def test_active(self):
-        from code_puppy.command_line.core_commands import handle_wiggum_stop_command
+        from code_puppy.plugins.wiggum.register_callbacks import (
+            handle_wiggum_stop_command,
+        )
 
         with (
             patch(
-                "code_puppy.command_line.wiggum_state.is_wiggum_active",
+                "code_puppy.plugins.wiggum.state.is_active",
                 return_value=True,
             ),
-            patch("code_puppy.command_line.wiggum_state.stop_wiggum"),
-            patch("code_puppy.messaging.emit_success"),
+            patch("code_puppy.plugins.wiggum.state.stop"),
+            patch("code_puppy.plugins.wiggum.register_callbacks.emit_success"),
         ):
             assert handle_wiggum_stop_command("/wiggum_stop") is True
 
     def test_not_active(self):
-        from code_puppy.command_line.core_commands import handle_wiggum_stop_command
+        from code_puppy.plugins.wiggum.register_callbacks import (
+            handle_wiggum_stop_command,
+        )
 
         with (
             patch(
-                "code_puppy.command_line.wiggum_state.is_wiggum_active",
+                "code_puppy.plugins.wiggum.state.is_active",
                 return_value=False,
             ),
-            patch("code_puppy.messaging.emit_info"),
+            patch("code_puppy.plugins.wiggum.register_callbacks.emit_info"),
         ):
             assert handle_wiggum_stop_command("/wiggum_stop") is True
 

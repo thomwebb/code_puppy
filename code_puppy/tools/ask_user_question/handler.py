@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from code_puppy.command_line.wiggum_state import is_wiggum_active
+from code_puppy.plugins.wiggum.state import is_active as is_wiggum_active
 from code_puppy.tools.subagent_context import is_subagent
 
 from .constants import CI_ENV_VARS, DEFAULT_TIMEOUT_SECONDS, MAX_VALIDATION_ERRORS_SHOWN
@@ -100,6 +100,17 @@ def ask_user_question(
             "if user input is required."
         )
 
+    # Validate input before environment/mode checks so callers get useful schema
+    # errors. Otherwise an invalid request during autonomous mode gets a spooky
+    # unrelated Wiggum error, which is technically true but deeply unhelpful.
+    try:
+        validated_input = _validate_input(questions)
+    except ValidationError as e:
+        error_msg = _format_validation_error(e)
+        return AskUserQuestionOutput.error_response(error_msg)
+    except (TypeError, ValueError) as e:
+        return AskUserQuestionOutput.error_response(f"Validation error: {e!s}")
+
     # Block interactive tools in wiggum (autonomous loop) mode
     if is_wiggum_active():
         return AskUserQuestionOutput.error_response(
@@ -115,15 +126,6 @@ def ask_user_question(
             "Cannot ask questions: not running in an interactive terminal. "
             "Please provide configuration through arguments or config files."
         )
-
-    # Validate input
-    try:
-        validated_input = _validate_input(questions)
-    except ValidationError as e:
-        error_msg = _format_validation_error(e)
-        return AskUserQuestionOutput.error_response(error_msg)
-    except (TypeError, ValueError) as e:
-        return AskUserQuestionOutput.error_response(f"Validation error: {e!s}")
 
     # Run the interactive TUI
     try:
