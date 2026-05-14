@@ -33,7 +33,9 @@ from code_puppy.http_utils import find_available_port
 from code_puppy.keymap import (
     KeymapError,
     get_cancel_agent_display_name,
+    get_pause_agent_display_name,
     validate_cancel_agent_key,
+    validate_pause_agent_key,
 )
 from code_puppy.messaging import emit_info
 from code_puppy.terminal_utils import (
@@ -225,6 +227,15 @@ async def main():
         emit_error(str(e))
         sys.exit(1)
 
+    # Validate pause_agent_key configuration early (Phase 3 of pause/steer)
+    try:
+        validate_pause_agent_key()
+    except KeymapError as e:
+        from code_puppy.messaging import emit_error
+
+        emit_error(str(e))
+        sys.exit(1)
+
     # Show uvx detection notice if we're on Windows + uvx
     # Also disable Ctrl+C at the console level to prevent terminal bricking
     try:
@@ -394,6 +405,10 @@ async def interactive_mode(message_renderer, initial_command: str = None) -> Non
     cancel_key = get_cancel_agent_display_name()
     emit_system_message(
         f"Press {cancel_key} during processing to cancel the current task or inference. Use Ctrl+X to interrupt running shell commands."
+    )
+    pause_key = get_pause_agent_display_name()
+    emit_system_message(
+        f"Press {pause_key} during processing to pause the agent and inject a steering message."
     )
     emit_system_message(
         "Use /autosave_load to manually load a previous autosave session."

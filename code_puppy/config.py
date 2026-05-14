@@ -313,6 +313,11 @@ def get_config_keys():
     default_keys.append("enable_streaming")
     # Add cancel agent key configuration
     default_keys.append("cancel_agent_key")
+    # Add max pause seconds configuration (used by pause/steer feature to
+    # auto-resume long pauses before SSE upstream times out).
+    default_keys.append("max_pause_seconds")
+    # Add pause-agent key configuration (companion to cancel_agent_key).
+    default_keys.append("pause_agent_key")
     # Add banner color keys
     for banner_name in DEFAULT_BANNER_COLORS:
         default_keys.append(f"banner_color_{banner_name}")
