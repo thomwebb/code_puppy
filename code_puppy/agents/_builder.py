@@ -19,6 +19,7 @@ from pydantic_ai import Agent as PydanticAgent
 from rich.text import Text
 
 from code_puppy.agents._compaction import make_history_processor
+from code_puppy.agents._steer_processor import make_steer_history_processor
 from code_puppy.agents.event_stream_handler import event_stream_handler
 from code_puppy.callbacks import (
     on_pre_mcp_autostart,
@@ -379,6 +380,7 @@ def build_pydantic_agent(
     mcp_servers = load_mcp_servers(agent_name=getattr(agent, "name", None))
     model_settings = make_model_settings(resolved_model_name)
     history_processor = make_history_processor(agent)
+    steer_processor = make_steer_history_processor(agent)
 
     def _new_pydantic_agent(toolsets: List[Any]) -> PydanticAgent:
         return PydanticAgent(
@@ -387,7 +389,10 @@ def build_pydantic_agent(
             output_type=output_type,
             retries=3,
             toolsets=toolsets,
-            history_processors=[history_processor],
+            # Order is critical: compaction first (may trim history to fit
+            # context), THEN steer injection (the steer must NOT be subject
+            # to compaction on this call — it just arrived).
+            history_processors=[history_processor, steer_processor],
             model_settings=model_settings,
         )
 

@@ -164,6 +164,32 @@ async def event_stream_handler(
         did_stream_anything = True
 
     async for event in events:
+        # ---- Pause gate ------------------------------------------------
+        # If the user has paused the agent, suppress rendering and block
+        # at this safe boundary until resume (or until the safety timeout
+        # expires, to avoid SSE upstream timeouts).
+        from code_puppy.messaging.pause_controller import get_pause_controller
+
+        _pc = get_pause_controller()
+        if _pc.is_paused():
+            # Hide the spinner while paused so nothing animates.
+            pause_all_spinners()
+            # Read max pause from config lazily (avoid module-load coupling).
+            from code_puppy.config import get_value
+
+            try:
+                max_pause = float(get_value("max_pause_seconds") or 45.0)
+            except (TypeError, ValueError):
+                max_pause = 45.0
+            resumed = await _pc.wait_if_paused(timeout=max_pause)
+            if not resumed:
+                from code_puppy.messaging import emit_warning
+
+                emit_warning(
+                    f"⏸️  Pause exceeded {max_pause:.0f}s; auto-resuming to "
+                    "avoid upstream timeout."
+                )
+
         # PartStartEvent - register the part but defer banner until content arrives
         if isinstance(event, PartStartEvent):
             # Fire stream event callback for part_start

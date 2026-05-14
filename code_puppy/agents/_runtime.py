@@ -53,6 +53,13 @@ except ImportError:  # pragma: no cover - 3.10 only
 
 from code_puppy.agents import _history, _key_listeners
 from code_puppy.agents._builder import build_pydantic_agent
+from code_puppy.agents._run_signals import (
+    drain_pause_state_on_cancel,
+    make_schedule_cancel,
+    make_schedule_pause,
+    prepare_queued_steer_injection,
+    reset_pause_state_at_run_start,
+)
 from code_puppy.agents._diagnostics import emit_exception_diagnostics
 from code_puppy.agents._non_streaming_render import (
     StreamingTextDetector,
@@ -76,7 +83,6 @@ from code_puppy.config import (
 )
 from code_puppy.keymap import cancel_agent_uses_signal
 from code_puppy.messaging import emit_error, emit_info, emit_warning
-from code_puppy.tools.agent_tools import _active_subagent_tasks
 from code_puppy.tools.command_runner import is_awaiting_user_input
 
 # ---- Streaming retry helpers ------------------------------------------------
@@ -288,6 +294,12 @@ async def run_with_mcp(
 ) -> Any:
     """Run ``agent`` against ``prompt`` with full MCP + cancellation support."""
 
+    # Scrub any stale PauseController state from a previously-cancelled run
+    # BEFORE we touch the prompt or build the agent. The controller is a
+    # process-wide singleton; without this guard a leftover steer queue
+    # would silently poison this run.
+    reset_pause_state_at_run_start()
+
     prompt = _sanitize_prompt(prompt)
     group_id = str(uuid.uuid4())
 
@@ -353,7 +365,40 @@ async def run_with_mcp(
 
         result = await _call_with_exception_recovery()
 
-        for _ in range(get_max_hook_retries()):
+        # ``now``-mode steering injection lives in ``make_steer_history_processor``
+        # (fires before every model call). ``queue``-mode steers are drained
+        # between ``agent.run()`` calls below — additive, won't interrupt
+        # in-progress work.
+        async def _follow_up_run(follow_up_prompt: Any) -> Any:
+            @streaming_retry()
+            async def _call_follow_up() -> Any:
+                return await pydantic_agent.run(
+                    follow_up_prompt,
+                    message_history=agent._message_history,
+                    usage_limits=usage_limits,
+                    event_stream_handler=stream_handler,
+                    **kwargs,
+                )
+
+            return await _call_follow_up()
+
+        hook_retries_used = 0
+        queued_steers_used = 0
+        max_hook_retries = get_max_hook_retries()
+        max_queued_steers = 50  # safety cap to prevent runaway loops
+
+        while True:
+            # 1) Drain queue-mode steers FIRST (user-priority over hook retries).
+            if queued_steers_used < max_queued_steers:
+                steer_text = prepare_queued_steer_injection(agent, result)
+                if steer_text is not None:
+                    queued_steers_used += 1
+                    result = await _follow_up_run(steer_text)
+                    continue
+
+            # 2) Plugin-requested hook retry (cap matches original loop).
+            if hook_retries_used >= max_hook_retries:
+                break
             hook_results = await on_agent_run_result(
                 result,
                 agent_name=agent.name,
@@ -371,18 +416,8 @@ async def run_with_mcp(
             if hasattr(result, "all_messages"):
                 agent._message_history = list(result.all_messages())
             await asyncio.sleep(retry_delay)
-
-            @streaming_retry()
-            async def _retry_call() -> Any:
-                return await pydantic_agent.run(
-                    retry_prompt,
-                    message_history=agent._message_history,
-                    usage_limits=usage_limits,
-                    event_stream_handler=stream_handler,
-                    **kwargs,
-                )
-
-            result = await _retry_call()
+            result = await _follow_up_run(retry_prompt)
+            hook_retries_used += 1
 
         # Fallback render when streaming didn't surface any text to the user.
         if result is not None and should_render_fallback(
@@ -430,9 +465,11 @@ async def run_with_mcp(
             )
         except* asyncio.CancelledError:
             emit_info("Cancelled")
+            drain_pause_state_on_cancel()
             await on_agent_run_cancel(group_id)
         except* InterruptedError as ie:
             emit_info(f"Interrupted: {ie}")
+            drain_pause_state_on_cancel()
             await on_agent_run_cancel(group_id)
         except* Exception as other:
             unexpected = _collect_exceptions(
@@ -467,25 +504,8 @@ async def run_with_mcp(
 
     loop = asyncio.get_running_loop()
 
-    def schedule_agent_cancel() -> None:
-        from code_puppy.tools.command_runner import _RUNNING_PROCESSES
-
-        if _RUNNING_PROCESSES:
-            emit_warning(
-                "Refusing to cancel Agent while a shell command is running — "
-                "press Ctrl+X to cancel the shell command."
-            )
-            return
-        if agent_task.done():
-            return
-        if _active_subagent_tasks:
-            emit_warning(
-                f"Cancelling {len(_active_subagent_tasks)} active subagent task(s)..."
-            )
-            for task in list(_active_subagent_tasks):
-                if not task.done():
-                    loop.call_soon_threadsafe(task.cancel)
-        loop.call_soon_threadsafe(agent_task.cancel)
+    schedule_agent_cancel = make_schedule_cancel(agent_task, loop)
+    schedule_agent_pause = make_schedule_pause(agent_task, loop)
 
     def keyboard_interrupt_handler(_sig, _frame):
         # Let input() handle its own KeyboardInterrupt if we're mid-prompt.
@@ -502,7 +522,7 @@ async def run_with_mcp(
 
     original_handler = None
     key_listener_stop_event: Optional[threading.Event] = None
-    key_listener_thread: Optional[threading.Thread] = None
+    key_listener_handle: Optional[_key_listeners.KeyListenerHandle] = None
 
     run_success = False
     run_error: Optional[BaseException] = None
@@ -511,14 +531,22 @@ async def run_with_mcp(
     try:
         if cancel_agent_uses_signal():
             original_handler = signal.signal(signal.SIGINT, keyboard_interrupt_handler)
+            cancel_cb: Optional[Callable[[], None]] = None  # SIGINT owns cancel
         else:
             original_handler = signal.signal(signal.SIGINT, graceful_sigint_handler)
-            key_listener_stop_event = threading.Event()
-            key_listener_thread = _key_listeners.spawn_key_listener(
-                key_listener_stop_event,
-                on_escape=lambda: None,  # Ctrl+X handled by command_runner
-                on_cancel_agent=schedule_agent_cancel,
-            )
+            cancel_cb = schedule_agent_cancel
+        # Always spawn a key listener — Ctrl+X (shell) and the pause-agent
+        # key both need it. The listener cheaply no-ops if stdin isn't a TTY.
+        key_listener_stop_event = threading.Event()
+        key_listener_handle = _key_listeners.spawn_key_listener(
+            key_listener_stop_event,
+            on_escape=lambda: None,  # Ctrl+X handled by command_runner
+            on_cancel_agent=cancel_cb,
+            on_pause_agent=schedule_agent_pause,
+        )
+        # Publish the handle so plugins (e.g. agent_steering) can suspend/
+        # resume the listener while they take over stdin.
+        _key_listeners.set_active_handle(key_listener_handle)
 
         result = await agent_task
         run_success = True
@@ -527,10 +555,12 @@ async def run_with_mcp(
     except asyncio.CancelledError:
         run_response_text = ""
         agent_task.cancel()
+        drain_pause_state_on_cancel()
     except KeyboardInterrupt:
         run_response_text = ""
         if not agent_task.done():
             agent_task.cancel()
+        drain_pause_state_on_cancel()
     except Exception as e:
         run_error = e
         raise
@@ -548,9 +578,13 @@ async def run_with_mcp(
         except Exception:
             pass
 
-        if key_listener_stop_event is not None:
+        if key_listener_handle is not None:
+            _key_listeners.set_active_handle(None)
+            key_listener_handle.stop()
+            key_listener_handle.thread.join(timeout=1.0)
+        elif key_listener_stop_event is not None:
+            # Handle is None (no TTY); just flip the stop event so any
+            # half-spawned bits unwind cleanly.
             key_listener_stop_event.set()
-        if key_listener_thread is not None:
-            key_listener_thread.join(timeout=1.0)
         if original_handler is not None:  # SIG_DFL is 0/falsy — explicit check!
             signal.signal(signal.SIGINT, original_handler)
