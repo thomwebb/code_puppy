@@ -61,7 +61,7 @@ def test_get_pause_agent_key_uvx_override(monkeypatch):
 
 
 def test_validate_pause_agent_key_accepts_valid(monkeypatch):
-    for valid in ("ctrl+t", "ctrl+p", "ctrl+y"):
+    for valid in keymap.VALID_PAUSE_KEYS:
         monkeypatch.setattr("code_puppy.config.get_value", lambda *_a, _v=valid: _v)
         keymap.validate_pause_agent_key()  # Must not raise
 
@@ -88,6 +88,18 @@ def test_get_pause_agent_char_code_ctrl_p(monkeypatch):
     assert keymap.get_pause_agent_char_code() == "\x10"
 
 
+def test_get_pause_agent_char_code_ctrl_o(monkeypatch):
+    """ctrl+o is a tmux-safe option added in the pause-key expansion."""
+    monkeypatch.setattr("code_puppy.config.get_value", lambda *_a, **_k: "ctrl+o")
+    assert keymap.get_pause_agent_char_code() == "\x0f"
+
+
+def test_get_pause_agent_char_code_ctrl_g(monkeypatch):
+    """ctrl+g is another tmux-safe option."""
+    monkeypatch.setattr("code_puppy.config.get_value", lambda *_a, **_k: "ctrl+g")
+    assert keymap.get_pause_agent_char_code() == "\x07"
+
+
 # =============================================================================
 # get_pause_agent_display_name
 # =============================================================================
@@ -101,3 +113,16 @@ def test_get_pause_agent_display_name_ctrl_t(monkeypatch):
 def test_get_pause_agent_display_name_ctrl_y(monkeypatch):
     monkeypatch.setattr("code_puppy.config.get_value", lambda *_a, **_k: "ctrl+y")
     assert keymap.get_pause_agent_display_name() == "Ctrl+Y"
+
+
+def test_get_pause_agent_display_name_ctrl_o(monkeypatch):
+    monkeypatch.setattr("code_puppy.config.get_value", lambda *_a, **_k: "ctrl+o")
+    assert keymap.get_pause_agent_display_name() == "Ctrl+O"
+
+
+def test_validate_pause_agent_key_rejects_dangerous_keys(monkeypatch):
+    """Keys that send signals or collide with terminal control must be rejected."""
+    for bad in ("ctrl+c", "ctrl+d", "ctrl+z", "ctrl+s", "ctrl+q", "escape"):
+        monkeypatch.setattr("code_puppy.config.get_value", lambda *_a, _v=bad: _v)
+        with pytest.raises(keymap.KeymapError):
+            keymap.validate_pause_agent_key()

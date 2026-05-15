@@ -47,11 +47,40 @@ VALID_CANCEL_KEYS: set[str] = {
 
 DEFAULT_CANCEL_AGENT_KEY: str = "ctrl+c"
 
-# Valid keys for pause_agent_key configuration. Mirrors VALID_CANCEL_KEYS
-# semantics: "escape" excluded because it collides with ANSI sequences.
+# Valid keys for pause_agent_key configuration.
+#
+# Excluded and why:
+#   ctrl+c  – SIGINT / cancel-agent key
+#   ctrl+d  – EOF (ambiguous in raw mode)
+#   ctrl+h  – backspace
+#   ctrl+i  – tab
+#   ctrl+j  – line-feed (Enter)
+#   ctrl+l  – some terminals intercept as clear-screen
+#   ctrl+m  – carriage-return (Enter)
+#   ctrl+q  – XON flow-control
+#   ctrl+s  – XOFF flow-control (can lock terminal)
+#   ctrl+z  – SIGTSTP (suspend)
+#   escape  – collides with ANSI escape sequences
+#
+# Note: ctrl+a and ctrl+b are tmux/screen prefix keys by default —
+# they work in raw mode but tmux may swallow them. Users who live
+# inside tmux should pick a key their tmux doesn't capture.
 VALID_PAUSE_KEYS: set[str] = {
-    "ctrl+t",
+    "ctrl+a",
+    "ctrl+b",
+    "ctrl+e",
+    "ctrl+f",
+    "ctrl+g",
+    "ctrl+k",
+    "ctrl+n",
+    "ctrl+o",
     "ctrl+p",
+    "ctrl+r",
+    "ctrl+t",
+    "ctrl+u",
+    "ctrl+v",
+    "ctrl+w",
+    "ctrl+x",
     "ctrl+y",
 }
 
