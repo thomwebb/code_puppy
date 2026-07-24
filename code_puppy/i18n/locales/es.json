@@ -25,7 +25,7 @@
   "cmd.session.usage": "Uso: /session [id|new]",
   "cmd.clear.cleared": "¡Historial de conversación limpiado!",
   "cmd.clear.agent_notice": "El agente no recordará interacciones anteriores.",
-  "cmd.clear.session_rotated": "Sesión de guardado automático rotada a: {id}",
+  "cmd.clear.session_rotated": "Sesión de guardado automático cambiada a: {id}",
   "cmd.clear.clipboard_cleared": "Se limpiaron {count} imagen(es) pendientes del portapapeles",
   "cmd.compact.queued": "Compactación solicitada; se ejecutará antes de la siguiente llamada al modelo.",
   "cmd.compact.no_history": "Aún no hay historial para compactar. ¡Pregúntame algo primero!",
@@ -54,5 +54,5 @@
   "cmd.load_context.not_found": "Archivo de contexto no encontrado: {path}",
   "cmd.load_context.available": "Contextos disponibles: {contexts}",
   "cmd.load_context.failed": "Error al cargar el contexto: {error}",
-  "cmd.load_context.success": "✅ Contexto cargado: {count} mensajes ({tokens} tokens)\n📁 Desde: {path}\n🔄 Guardado automático rotado a: {session_id} (se conserva la instantánea en {file}; los siguientes guardados automáticos irán a la nueva sesión)"
+  "cmd.load_context.success": "✅ Contexto cargado: {count} mensajes ({tokens} tokens)\n📁 Desde: {path}\n🔄 Guardado automático cambiado a: {session_id} (se conserva la instantánea en {file}; los siguientes guardados automáticos irán a la nueva sesión)"
 }
