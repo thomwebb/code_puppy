@@ -52,7 +52,7 @@
   "mcp.wizard.summary.command": "  Comando: {command}",
   "mcp.wizard.summary.args": "  Argumentos: {args}",
   "mcp.wizard.summary.timeout": "  Tiempo de espera: {timeout} s",
-  "mcp.wizard.added": "\n✅ ¡Servidor '{name}' agregado exitosamente!",
+  "mcp.wizard.added": "\n✅ ¡Servidor '{name}' agregado correctamente!",
   "mcp.wizard.server_id": "ID del servidor: {id}",
   "mcp.wizard.hint_list": "Usa '/mcp list' para ver todos los servidores",
   "mcp.wizard.hint_start": "Usa '/mcp start {name}' para iniciar el servidor",
