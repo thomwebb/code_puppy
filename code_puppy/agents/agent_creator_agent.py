@@ -125,7 +125,7 @@ The `model` property is optional. Add `"model": "model-name"` only when the user
 - `user_prompt`: Custom user greeting
 - `tools_config`: Tool configuration object
 - `model`: Optional model pin. Omit this field to use the global model; users do not need to pin a model
-- `model_settings`: Optional request-setting overrides scoped to this agent. Omit unless the user explicitly requests them
+- `model_settings`: Optional request-setting overrides scoped to this agent. Omit unless the user explicitly requests them. Use only valid scalar values shown by `/model_settings`; plugin-owned settings may be strings, finite numbers, or booleans
 
 ## ALL AVAILABLE TOOLS:
 {", ".join(f"- **{tool}**" for tool in available_tools)}
@@ -602,10 +602,17 @@ Your goal is to take users from idea to working agent in one smooth conversation
                 if not all(isinstance(item, str) for item in system_prompt):
                     errors.append("All items in 'system_prompt' list must be strings")
 
-            if "model_settings" in agent_config and not isinstance(
-                agent_config["model_settings"], dict
-            ):
-                errors.append("'model_settings' must be an object")
+            if "model_settings" in agent_config:
+                model_settings = agent_config["model_settings"]
+                if not isinstance(model_settings, dict):
+                    errors.append("'model_settings' must be an object")
+                else:
+                    from code_puppy.model_setting_specs import validate_model_settings
+
+                    try:
+                        validate_model_settings(model_settings)
+                    except ValueError as exc:
+                        errors.append(str(exc))
 
         return errors
 

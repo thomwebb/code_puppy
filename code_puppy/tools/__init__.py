@@ -138,7 +138,11 @@ EXTENDED_THINKING_PROMPT_NOTE = (
 )
 
 
-def has_extended_thinking_active(model_name: str | None = None) -> bool:
+def has_extended_thinking_active(
+    model_name: str | None = None,
+    *,
+    settings_overrides: dict | None = None,
+) -> bool:
     """Check if an Anthropic model has extended thinking enabled or adaptive.
 
     When extended thinking is active, the model already exposes its reasoning
@@ -146,6 +150,8 @@ def has_extended_thinking_active(model_name: str | None = None) -> bool:
 
     Args:
         model_name: The model name to check. If None, uses the current global model.
+        settings_overrides: Final agent-scoped settings for the resolved model.
+            These take precedence over persisted per-model settings.
 
     Returns:
         True if the model is an Anthropic model with extended_thinking set to
@@ -159,14 +165,18 @@ def has_extended_thinking_active(model_name: str | None = None) -> bool:
     if model_name is None:
         return False
 
-    # Only applies to Anthropic/Claude models
-    if not (model_name.startswith("claude-") or model_name.startswith("anthropic-")):
+    from code_puppy.model_factory import ModelFactory, is_anthropic_model
+
+    model_config = ModelFactory.load_config().get(model_name, {})
+    if not is_anthropic_model(model_name, model_config):
         return False
 
     from code_puppy.model_utils import get_default_extended_thinking
 
     settings = get_effective_model_settings(model_name)
-    default_thinking = get_default_extended_thinking(model_name)
+    settings.update(settings_overrides or {})
+    actual_model_id = model_config.get("name", model_name)
+    default_thinking = get_default_extended_thinking(model_name, actual_model_id)
     extended_thinking = settings.get("extended_thinking", default_thinking)
 
     # Handle legacy boolean values
@@ -183,6 +193,7 @@ def register_tools_for_agent(
     tool_names: list[str],
     model_name: str | None = None,
     agent_name: str | None = None,
+    settings_overrides: dict | None = None,
 ):
     """Register specific tools for an agent based on tool names.
 
@@ -195,6 +206,8 @@ def register_tools_for_agent(
         agent_name: Optional logical agent name (e.g. ``"code-puppy"``).
             Passed to the ``register_agent_tools`` callback so plugins can
             advertise tools per-agent if they want.
+        settings_overrides: Final settings for this agent/model. Used for
+            model-dependent tool selection without consulting global state.
     """
     from code_puppy.config import get_universal_constructor_enabled
 
@@ -239,6 +252,11 @@ def register_tools_for_agent(
                 expanded_tools.append(tool_name)
                 seen.add(tool_name)
     tool_names = expanded_tools
+
+    if has_extended_thinking_active(model_name, settings_overrides=settings_overrides):
+        tool_names = [
+            name for name in tool_names if name != "agent_share_your_reasoning"
+        ]
 
     for tool_name in tool_names:
         # Handle UC tools (prefixed with "uc:")

@@ -99,6 +99,7 @@ def _build_agent_config():
 
     config.temporary_model_name_override.side_effect = temporary_override
     config.get_model_name.return_value = "override-model"
+    config.get_model_settings_overrides.return_value = {}
     config.get_full_system_prompt.return_value = "Test instructions"
     config.get_available_tools.return_value = ["list_files"]
     config.get_message_history.return_value = []
@@ -116,6 +117,7 @@ async def _run_invoke(
     perf=None,
     use_default=False,
     new_messages=(),
+    model_settings_overrides=None,
 ):
     """Drive _invoke_agent_impl with a mocked temp agent and return the output.
 
@@ -133,6 +135,9 @@ async def _run_invoke(
     invoke = _capture_invoke_default() if use_default else _capture_invoke_with_model()
     mock_context = MagicMock()
     agent_config = _build_agent_config()
+    agent_config.get_model_settings_overrides.return_value = (
+        model_settings_overrides or {}
+    )
     if capture is not None:
         capture["agent_config"] = agent_config
     if partial_history is not None:
@@ -159,6 +164,11 @@ async def _run_invoke(
         async def successful_run(*args, **kwargs):
             if capture is not None:
                 capture["executing_agent"] = get_executing_agent()
+                from code_puppy.config import get_all_model_settings
+
+                capture["scoped_model_settings"] = get_all_model_settings(
+                    "override-model"
+                )
             return result
 
         mock_temp_agent.run = AsyncMock(side_effect=successful_run)
@@ -210,7 +220,10 @@ async def _run_invoke(
         p(
             patch(
                 "code_puppy.model_factory.ModelFactory.load_config",
-                return_value={"default-model": {}, "override-model": {}},
+                return_value={
+                    "default-model": {},
+                    "override-model": {"supported_settings": ["fast"]},
+                },
             )
         )
         p(patch("code_puppy.model_factory.ModelFactory.get_model"))
@@ -218,9 +231,17 @@ async def _run_invoke(
         p(patch("code_puppy.agents._builder.load_puppy_rules", return_value=None))
         p(patch("code_puppy.callbacks.on_load_prompt", return_value=[]))
         mock_prepare = p(patch("code_puppy.model_utils.prepare_prompt_for_model"))
-        mock_prepare.return_value = MagicMock(
-            instructions="prepared instructions", user_prompt="prepared prompt"
-        )
+
+        def prepare_prompt(model_name, *_args, **_kwargs):
+            if capture is not None:
+                from code_puppy.config import get_all_model_settings
+
+                capture["prompt_model_settings"] = get_all_model_settings(model_name)
+            return MagicMock(
+                instructions="prepared instructions", user_prompt="prepared prompt"
+            )
+
+        mock_prepare.side_effect = prepare_prompt
         p(
             patch(
                 "code_puppy.agents._builder.autostart_bound_servers_async",
@@ -243,10 +264,20 @@ async def _run_invoke(
             )
         )
         p(patch("code_puppy.tools.register_tools_for_agent"))
+
+        def wrap_agent(_cfg, agent, **_kwargs):
+            if capture is not None:
+                from code_puppy.config import get_all_model_settings
+
+                capture["wrap_model_settings"] = get_all_model_settings(
+                    "override-model"
+                )
+            return agent
+
         p(
             patch(
                 "code_puppy.tools.subagent_invocation.on_wrap_pydantic_agent",
-                side_effect=lambda _cfg, agent, **_kwargs: agent,
+                side_effect=wrap_agent,
             )
         )
         p(
@@ -282,6 +313,21 @@ async def _run_invoke(
             prompt="Hello",
             model_name="override-model",
         )
+
+
+@pytest.mark.asyncio
+async def test_subagent_request_exposes_agent_settings_to_dynamic_plugin_reads():
+    capture = {}
+
+    output = await _run_invoke(
+        capture=capture,
+        model_settings_overrides={"fast": True},
+    )
+
+    assert output.error is None
+    assert capture["prompt_model_settings"] == {"fast": True}
+    assert capture["wrap_model_settings"] == {"fast": True}
+    assert capture["scoped_model_settings"] == {"fast": True}
 
 
 class TestExtractUsageMetrics:

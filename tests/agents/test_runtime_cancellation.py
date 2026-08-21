@@ -23,7 +23,11 @@ from typing import Any
 import pytest
 
 from code_puppy.agents import _runtime
-from code_puppy.callbacks import _callbacks, clear_callbacks
+from code_puppy.callbacks import (
+    _callbacks,
+    clear_callbacks,
+    register_callback,
+)
 
 
 class HangingPydanticAgent:
@@ -111,6 +115,78 @@ async def test_cancelled_run_terminates_without_cancel_scope_error():
     # Let the inner agent task finish unwinding its cancellation.
     await asyncio.sleep(0)
     assert pydantic_agent.cancelled, "inner agent task was not cancelled"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(asyncio.CancelledError(), id="asyncio-cancelled"),
+        pytest.param(
+            pytest.importorskip("pydantic_ai.exceptions").RunCancelled(
+                "cancelled", messages=[]
+            ),
+            id="run-cancelled",
+        ),
+        pytest.param(InterruptedError("interrupted"), id="interrupted"),
+    ],
+)
+async def test_cancellation_hooks_observe_agent_settings(outcome):
+    """Every cancellation exception path must re-enter the agent scope."""
+    pydantic_agent = ScriptedPydanticAgent(outcome)
+    agent = DummyAgent(pydantic_agent)
+    agent._last_model_name = "working-model"
+    agent._resolved_model_settings_overrides = {"fast": True}
+    observed = []
+
+    def observe_cancel(_group_id):
+        from code_puppy.model_setting_specs import get_scoped_model_settings
+
+        observed.append(get_scoped_model_settings("working-model"))
+
+    register_callback("agent_run_cancel", observe_cancel)
+    await _runtime.run_with_mcp(agent, "hello")
+
+    assert observed == [{"fast": True}]
+
+
+async def test_concurrent_cancellation_hooks_keep_settings_isolated():
+    """Suspended cancellation callbacks must retain task-local settings."""
+    entered = 0
+    both_entered = asyncio.Event()
+    observed = []
+
+    async def observe_cancel(_group_id):
+        nonlocal entered
+        from code_puppy.model_setting_specs import get_scoped_model_settings
+
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await both_entered.wait()
+        observed.append(
+            (
+                get_scoped_model_settings("model-a"),
+                get_scoped_model_settings("model-b"),
+            )
+        )
+
+    register_callback("agent_run_cancel", observe_cancel)
+
+    def make_agent(model_name, value):
+        agent = DummyAgent(ScriptedPydanticAgent(InterruptedError("stop")))
+        agent._last_model_name = model_name
+        agent._resolved_model_settings_overrides = {"fast": value}
+        return agent
+
+    await asyncio.gather(
+        _runtime.run_with_mcp(make_agent("model-a", True), "first"),
+        _runtime.run_with_mcp(make_agent("model-b", False), "second"),
+    )
+
+    assert sorted(observed, key=lambda item: bool(item[0])) == [
+        ({}, {"fast": False}),
+        ({"fast": True}, {}),
+    ]
 
 
 # ---------------------------------------------------------------------------

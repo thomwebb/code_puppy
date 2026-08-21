@@ -37,6 +37,7 @@ from code_puppy.config import (
 )
 from code_puppy.messaging import emit_info
 from code_puppy.model_factory import ModelFactory
+from code_puppy.model_setting_specs import MODEL_SETTING_DEFINITIONS
 from code_puppy.tools.command_runner import set_awaiting_user_input
 from code_puppy.callbacks import on_prompt_toolkit_style
 
@@ -46,134 +47,7 @@ MODELS_PER_PAGE = 15
 # Setting definitions with metadata
 # Numeric settings have min/max/step, choice settings have choices list
 SETTING_DEFINITIONS: Dict[str, Dict] = {
-    "temperature": {
-        "name": "Temperature",
-        "description": "Controls randomness (0.0-1.0). Lower = more deterministic, higher = more creative.",
-        "type": "numeric",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.05,
-        "default": None,  # None means use model default
-        "format": "{:.2f}",
-    },
-    "seed": {
-        "name": "Seed",
-        "description": "Random seed for reproducible outputs. Set to same value for consistent results.",
-        "type": "numeric",
-        "min": 0,
-        "max": 999999,
-        "step": 1,
-        "default": None,
-        "format": "{:.0f}",
-    },
-    "top_p": {
-        "name": "Top-P (Nucleus Sampling)",
-        "description": "Controls token diversity. 0.0 = least random (only most likely tokens), 1.0 = most random (sample from all tokens).",
-        "type": "numeric",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.05,
-        "default": None,
-        "format": "{:.2f}",
-    },
-    "reasoning_effort": {
-        "name": "Reasoning Effort",
-        "description": "Controls how much effort GPT-5 models spend on reasoning. Higher = more thorough but slower.",
-        "type": "choice",
-        "choices": ["none", "low", "medium", "high", "xhigh", "max"],
-        "default": "medium",
-    },
-    "reasoning_context": {
-        "name": "Reasoning Context",
-        "description": "Controls which prior reasoning is retained for GPT-5.6 Responses models. All turns preserves reasoning across the conversation.",
-        "type": "choice",
-        "choices": ["all_turns", "current_turn", "auto"],
-        "default": "all_turns",
-    },
-    "reasoning_mode": {
-        "name": "Reasoning Mode",
-        "description": "Controls the GPT-5.6 reasoning mode. Standard is the default; Pro spends more compute and is only available on supported variants.",
-        "type": "choice",
-        "choices": ["standard", "pro"],
-        "default": "standard",
-    },
-    "summary": {
-        "name": "Reasoning Summary",
-        "description": "Controls whether OpenAI Responses models return auto, concise, or detailed reasoning summaries.",
-        "type": "choice",
-        "choices": ["auto", "concise", "detailed"],
-        "default": "auto",
-    },
-    "verbosity": {
-        "name": "Verbosity",
-        "description": "Controls response length. Low = concise, Medium = balanced, High = verbose.",
-        "type": "choice",
-        "choices": ["low", "medium", "high"],
-        "default": "medium",
-    },
-    "extended_thinking": {
-        "name": "Extended Thinking",
-        "description": "Controls extended thinking mode. 'enabled' = classic thinking with budget_tokens, 'adaptive' = model decides when/how much to think (no budget), 'off' = disabled.",
-        "type": "choice",
-        "choices": ["enabled", "adaptive", "off"],
-        "default": "enabled",
-    },
-    "budget_tokens": {
-        "name": "Thinking Budget (tokens)",
-        "description": "Max tokens for extended thinking. Only used when extended_thinking is 'enabled'.",
-        "type": "numeric",
-        "min": 1024,
-        "max": 131072,
-        "step": 1024,
-        "default": 10000,
-        "format": "{:.0f}",
-    },
-    "interleaved_thinking": {
-        "name": "Interleaved Thinking",
-        "description": "Enable thinking between tool calls (Claude 4 only: Opus 4.5, Opus 4.1, Opus 4, Sonnet 4). Adds beta header. WARNING: On Vertex/Bedrock, this FAILS for non-Claude 4 models!",
-        "type": "boolean",
-        "default": False,
-    },
-    "clear_thinking": {
-        "name": "Clear Thinking",
-        "description": "False = Preserved Thinking (keep <think> blocks visible). True = strip thinking from responses.",
-        "type": "boolean",
-        "default": False,
-    },
-    "thinking_type": {
-        "name": "Thinking Type (GLM)",
-        "description": "GLM deep-thinking mode. 'enabled' (default) = model auto-decides whether to think (forced on for GLM-4.7/4.5V regardless). 'disabled' = direct answers, no thinking.",
-        "type": "choice",
-        "choices": ["enabled", "disabled"],
-        "default": "enabled",
-    },
-    "glm_reasoning_effort": {
-        "name": "Reasoning Effort (GLM-5.2+)",
-        "description": "Chain-of-thought reasoning effort, GLM-5.2+ only. 'max' is default/recommended. none/minimal skip thinking; low/medium are mapped to high server-side; xhigh is mapped to max.",
-        "type": "choice",
-        "choices": ["max", "xhigh", "high", "medium", "low", "minimal", "none"],
-        "default": "max",
-    },
-    "thinking_enabled": {
-        "name": "Thinking Enabled",
-        "description": "Enable thinking mode for Gemini 3 Pro models. When enabled, the model will show its reasoning process.",
-        "type": "boolean",
-        "default": True,
-    },
-    "thinking_level": {
-        "name": "Thinking Level",
-        "description": "Controls the depth of thinking for Gemini 3 Pro models. Low = faster responses, High = more thorough reasoning.",
-        "type": "choice",
-        "choices": ["low", "high"],
-        "default": "low",
-    },
-    "effort": {
-        "name": "Effort",
-        "description": "Controls how much effort adaptive models spend on their response. Low = fast, Max = most thorough.",
-        "type": "choice",
-        "choices": ["low", "medium", "high", "xhigh", "max"],
-        "default": "high",
-    },
+    **MODEL_SETTING_DEFINITIONS,
     "retry_main_strategy": {
         "name": "Retry Strategy (main agent)",
         "description": (

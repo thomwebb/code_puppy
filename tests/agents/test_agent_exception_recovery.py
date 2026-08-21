@@ -26,8 +26,12 @@ class ScriptedPydanticAgent:
     def __init__(self, *outcomes: Any) -> None:
         self._outcomes = list(outcomes)
         self.calls: list[dict[str, Any]] = []
+        self.scoped_model_settings: dict[str, Any] = {}
 
     async def run(self, prompt: Any, **kwargs: Any) -> Any:
+        from code_puppy.config import get_all_model_settings
+
+        self.scoped_model_settings = get_all_model_settings("dummy-model")
         history = kwargs.get("message_history")
         self.calls.append(
             {
@@ -104,6 +108,80 @@ async def test_no_callbacks_preserves_baseline_exception_path(
 
     assert len(pydantic_agent.calls) == 1
     assert diagnostics == [original]
+
+
+async def test_request_exposes_agent_settings_to_dynamic_plugin_reads(
+    diagnostics: list[BaseException],
+) -> None:
+    pydantic_agent = ScriptedPydanticAgent(DummyResult("done"))
+    agent = DummyAgent(pydantic_agent)
+    agent._last_model_name = "dummy-model"
+    agent._resolved_model_settings_overrides = {"fast": True}
+
+    await _runtime.run_with_mcp(agent, "hello")
+
+    assert pydantic_agent.scoped_model_settings == {"fast": True}
+    assert diagnostics == []
+
+
+async def test_user_prompt_hook_observes_fallback_identity_settings(
+    diagnostics: list[BaseException],
+) -> None:
+    pydantic_agent = ScriptedPydanticAgent(DummyResult("done"))
+    agent = DummyAgent(pydantic_agent)
+    agent._last_model_name = "working-model"
+    agent._resolved_model_settings_overrides = {"fast": True}
+    observed = {}
+
+    def observe_prompt(_prompt, _group_id):
+        from code_puppy.config import get_all_model_settings
+
+        observed.update(get_all_model_settings("working-model"))
+
+    register_callback("user_prompt_submit", observe_prompt)
+
+    await _runtime.run_with_mcp(agent, "hello")
+
+    assert observed == {"fast": True}
+    assert diagnostics == []
+
+
+async def test_fallback_identity_and_settings_reach_start_result_and_end_hooks(
+    diagnostics: list[BaseException],
+) -> None:
+    pydantic_agent = ScriptedPydanticAgent(DummyResult("done"))
+    agent = DummyAgent(pydantic_agent)
+    agent._last_model_name = "working-model"
+    agent._resolved_model_settings_overrides = {"fast": True}
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+
+    def observe_start(_agent_name, model_name, _session_id):
+        from code_puppy.config import get_all_model_settings
+
+        seen.append(("start", model_name, get_all_model_settings(model_name)))
+
+    def observe_result(_result, _agent_name, model_name):
+        from code_puppy.config import get_all_model_settings
+
+        seen.append(("result", model_name, get_all_model_settings(model_name)))
+
+    def observe_end(_agent_name, model_name, _session_id, *_args):
+        from code_puppy.config import get_all_model_settings
+
+        seen.append(("end", model_name, get_all_model_settings(model_name)))
+
+    register_callback("agent_run_start", observe_start)
+    register_callback("agent_run_result", observe_result)
+    register_callback("agent_run_end", observe_end)
+
+    await _runtime.run_with_mcp(agent, "hello")
+
+    assert seen == [
+        ("start", "working-model", {"fast": True}),
+        ("result", "working-model", {"fast": True}),
+        ("end", "working-model", {"fast": True}),
+    ]
+    assert diagnostics == []
 
 
 async def test_agent_exception_callback_fires_without_retry(

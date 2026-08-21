@@ -553,6 +553,23 @@ def _extract_response_text(result: Any) -> str:
     return str(result)
 
 
+def _effective_model_name(agent: Any) -> str:
+    """Return the model actually backing the current pydantic agent."""
+    return getattr(agent, "_last_model_name", None) or agent.get_model_name()
+
+
+def _agent_model_settings_scope(agent: Any):
+    """Scope settings to every plugin-facing phase of one agent lifecycle."""
+    from code_puppy.model_setting_specs import model_settings_scope
+
+    return model_settings_scope(
+        _effective_model_name(agent),
+        getattr(agent, "_resolved_model_settings_overrides", {}),
+        raw_settings=getattr(agent, "_raw_model_settings_overrides", {}),
+        models_config=getattr(agent, "_model_settings_models_config", {}),
+    )
+
+
 def _should_prepend_system_prompt(agent: Any, prompt: str) -> str:
     """Prepend system prompt to user prompt on the first turn (claude-code etc)."""
     from code_puppy.agents._builder import load_puppy_rules
@@ -561,13 +578,15 @@ def _should_prepend_system_prompt(agent: Any, prompt: str) -> str:
     if agent._message_history:
         return prompt
 
-    system_prompt = agent.get_full_system_prompt()
-    rules = load_puppy_rules()
-    if rules:
-        system_prompt += f"\n{rules}"
+    system_prompt = getattr(agent, "_resolved_system_prompt", None)
+    if system_prompt is None:
+        system_prompt = agent.get_full_system_prompt()
+        rules = load_puppy_rules()
+        if rules:
+            system_prompt += f"\n{rules}"
 
     prepared = prepare_prompt_for_model(
-        model_name=agent.get_model_name(),
+        model_name=_effective_model_name(agent),
         system_prompt=system_prompt,
         user_prompt=prompt,
         prepend_system_to_user=True,
@@ -682,17 +701,6 @@ async def _run_with_mcp_impl(
     prompt = _sanitize_prompt(prompt)
     group_id = str(uuid.uuid4())
 
-    # Fire user_prompt_submit hooks BEFORE the prompt is sent; plugins (e.g.
-    # claude_code_hooks) may return a replacement prompt string.
-    try:
-        submit_results = await on_user_prompt_submit(prompt, group_id)
-        for r in submit_results:
-            if isinstance(r, str) and r:
-                prompt = r
-    except Exception:
-        # Hook failures must never block the run.
-        pass
-
     if agent._code_generation_agent is None:
         build_pydantic_agent(agent)
     pydantic_agent = agent._code_generation_agent
@@ -700,7 +708,19 @@ async def _run_with_mcp_impl(
     if output_type is not None:
         pydantic_agent = build_pydantic_agent(agent, output_type=output_type)
 
-    prompt = _should_prepend_system_prompt(agent, prompt)
+    # Build first so prompt callbacks observe the effective fallback identity
+    # and this agent's settings rather than an unresolved pin/global default.
+    with _agent_model_settings_scope(agent):
+        try:
+            submit_results = await on_user_prompt_submit(prompt, group_id)
+            for r in submit_results:
+                if isinstance(r, str) and r:
+                    prompt = r
+        except Exception:
+            # Hook failures must never block the run.
+            pass
+
+        prompt = _should_prepend_system_prompt(agent, prompt)
     prompt_payload = _build_prompt_payload(prompt, attachments, link_attachments)
 
     async def _do_run(prompt_to_use: Any) -> Any:
@@ -724,7 +744,7 @@ async def _run_with_mcp_impl(
 
         _main_retry = make_streaming_retry(
             "main",
-            agent.get_model_name(),
+            _effective_model_name(agent),
             # Completed steps are checkpointed into _message_history, so a
             # growing history means real progress → refresh the budget.
             progress_fn=lambda: len(agent._message_history or []),
@@ -749,7 +769,7 @@ async def _run_with_mcp_impl(
                     exc,
                     agent=agent,
                     agent_name=agent.name,
-                    model_name=agent.get_model_name(),
+                    model_name=_effective_model_name(agent),
                 )
                 retry_req = next(
                     (r for r in hook_results if isinstance(r, dict) and r.get("retry")),
@@ -801,7 +821,7 @@ async def _run_with_mcp_impl(
             hook_results = await on_agent_run_result(
                 result,
                 agent_name=agent.name,
-                model_name=agent.get_model_name(),
+                model_name=_effective_model_name(agent),
             )
             retry_req = next(
                 (r for r in hook_results if isinstance(r, dict) and r.get("retry")),
@@ -842,13 +862,14 @@ async def _run_with_mcp_impl(
             )
 
             mcp_servers = getattr(agent, "_mcp_servers", None) or []
-            run_ctxs = on_agent_run_context(
-                agent, pydantic_agent, group_id, mcp_servers
-            )
-            async with AsyncExitStack() as stack:
-                for cm in run_ctxs:
-                    await stack.enter_async_context(cm)
-                return await _do_run(prompt_payload)
+            with _agent_model_settings_scope(agent):
+                run_ctxs = on_agent_run_context(
+                    agent, pydantic_agent, group_id, mcp_servers
+                )
+                async with AsyncExitStack() as stack:
+                    for cm in run_ctxs:
+                        await stack.enter_async_context(cm)
+                    return await _do_run(prompt_payload)
         except* UsageLimitExceeded as ule:
             emit_info(f"Usage limit exceeded: {ule}", group_id=group_id)
             emit_info(
@@ -879,7 +900,8 @@ async def _run_with_mcp_impl(
             # ("...AaronCancelled"). Mirrors cli_runner's "\nCancelled".
             emit_info("\nCancelled")
             drain_pause_state_on_cancel()
-            await on_agent_run_cancel(group_id)
+            with _agent_model_settings_scope(agent):
+                await on_agent_run_cancel(group_id)
         except* RunCancelled as rc_group:
             # First-party cancellation (RunContext.cancel() from a tool or
             # capability hook). Same UX as an external cancel, but the
@@ -887,11 +909,13 @@ async def _run_with_mcp_impl(
             _checkpoint_cancelled_history(rc_group, agent)
             emit_info("\nCancelled")
             drain_pause_state_on_cancel()
-            await on_agent_run_cancel(group_id)
+            with _agent_model_settings_scope(agent):
+                await on_agent_run_cancel(group_id)
         except* InterruptedError as ie:
             emit_info(f"\nInterrupted: {ie}")
             drain_pause_state_on_cancel()
-            await on_agent_run_cancel(group_id)
+            with _agent_model_settings_scope(agent):
+                await on_agent_run_cancel(group_id)
         except* Exception as other:
             unexpected = _collect_exceptions(
                 other,
@@ -914,10 +938,10 @@ async def _run_with_mcp_impl(
     # refresh, credential minting) finish before any HTTP leaves — else the
     # task races ahead with stale credentials (issue #338).
     try:
-        with executing_agent_context(agent):
+        with executing_agent_context(agent), _agent_model_settings_scope(agent):
             await on_agent_run_start(
                 agent_name=agent.name,
-                model_name=agent.get_model_name(),
+                model_name=_effective_model_name(agent),
                 session_id=group_id,
             )
     except Exception:
@@ -1095,16 +1119,16 @@ async def _run_with_mcp_impl(
             except Exception:
                 pass
         try:
-            with executing_agent_context(agent):
+            with executing_agent_context(agent), _agent_model_settings_scope(agent):
                 await on_agent_run_end(
                     agent_name=agent.name,
-                    model_name=agent.get_model_name(),
+                    model_name=_effective_model_name(agent),
                     session_id=group_id,
                     success=run_success,
                     error=run_error,
                     response_text=run_response_text,
                     metadata={
-                        "model": agent.get_model_name(),
+                        "model": _effective_model_name(agent),
                         **run_usage_metadata,
                     },
                 )

@@ -1,5 +1,6 @@
 import threading
 from contextlib import asynccontextmanager, suppress
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, List
 
@@ -40,6 +41,9 @@ class RoundRobinModel(Model):
     _current_index: int = field(default=0, repr=False)
     _model_name: str = field(repr=False)
     _rotate_every: int = field(default=1, repr=False)
+    _per_model_settings: List[ModelSettings | None] = field(
+        default_factory=list, repr=False
+    )
     _request_count: int = field(default=0, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -48,6 +52,7 @@ class RoundRobinModel(Model):
         *models: Model,
         rotate_every: int = 1,
         settings: ModelSettings | None = None,
+        per_model_settings: List[ModelSettings | None] | None = None,
     ):
         """Initialize a round-robin model instance.
 
@@ -55,6 +60,8 @@ class RoundRobinModel(Model):
             models: The model instances to cycle through.
             rotate_every: Number of requests before rotating to the next model (default: 1).
             settings: Model settings that will be used as defaults for this model.
+            per_model_settings: Settings resolved for each child model. The list
+                must align with ``models``; child settings override wrapper settings.
         """
         super().__init__(settings=settings)
         if not models:
@@ -62,6 +69,12 @@ class RoundRobinModel(Model):
         if rotate_every < 1:
             raise ValueError("rotate_every must be at least 1")
         self.models = list(models)
+        if per_model_settings is None:
+            self._per_model_settings = [None] * len(self.models)
+        elif len(per_model_settings) != len(self.models):
+            raise ValueError("per_model_settings must align with models")
+        else:
+            self._per_model_settings = [deepcopy(item) for item in per_model_settings]
         self._current_index = 0
         self._request_count = 0
         self._rotate_every = rotate_every
@@ -85,15 +98,29 @@ class RoundRobinModel(Model):
         """Base URL from the current model."""
         return self.models[self._current_index].base_url
 
-    def _get_next_model(self) -> Model:
-        """Get the next model in the round-robin sequence and update the index."""
+    def _get_next_model(self) -> tuple[Model, ModelSettings | None]:
+        """Get the next model and its settings, then update the index."""
         with self._lock:
-            model = self.models[self._current_index]
+            index = self._current_index
+            model = self.models[index]
+            child_settings = self._per_model_settings[index]
             self._request_count += 1
             if self._request_count >= self._rotate_every:
                 self._current_index = (self._current_index + 1) % len(self.models)
                 self._request_count = 0
-            return model
+            return model, deepcopy(child_settings)
+
+    @staticmethod
+    def _merge_child_settings(
+        model_settings: ModelSettings | None,
+        child_settings: ModelSettings | None,
+    ) -> ModelSettings | None:
+        """Merge wrapper settings with settings for the selected child."""
+        if not model_settings and not child_settings:
+            return None
+        merged = ModelSettings(**deepcopy(dict(model_settings or {})))
+        merged.update(deepcopy(dict(child_settings or {})))
+        return merged
 
     async def request(
         self,
@@ -102,10 +129,11 @@ class RoundRobinModel(Model):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         """Make a request using the next model in the round-robin sequence."""
-        current_model = self._get_next_model()
+        current_model, child_settings = self._get_next_model()
+        effective_settings = self._merge_child_settings(model_settings, child_settings)
         # Use prepare_request to merge settings and customize parameters
         merged_settings, prepared_params = current_model.prepare_request(
-            model_settings, model_request_parameters
+            effective_settings, model_request_parameters
         )
 
         try:
@@ -128,10 +156,11 @@ class RoundRobinModel(Model):
         run_context: RunContext[Any] | None = None,
     ) -> AsyncIterator[StreamedResponse]:
         """Make a streaming request using the next model in the round-robin sequence."""
-        current_model = self._get_next_model()
+        current_model, child_settings = self._get_next_model()
+        effective_settings = self._merge_child_settings(model_settings, child_settings)
         # Use prepare_request to merge settings and customize parameters
         merged_settings, prepared_params = current_model.prepare_request(
-            model_settings, model_request_parameters
+            effective_settings, model_request_parameters
         )
 
         async with current_model.request_stream(

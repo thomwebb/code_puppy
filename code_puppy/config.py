@@ -775,8 +775,25 @@ def model_supports_setting(
         if models_config is None:
             models_config = ModelFactory.load_config()
         model_config = models_config.get(model_name, {})
+        underlying_name = str(model_config.get("name", ""))
+        from code_puppy.model_setting_specs import (
+            gpt_5_minor_version,
+            uses_anthropic_messages_api,
+        )
+
+        gpt_5_minor = gpt_5_minor_version(model_name, model_config)
+        if setting in ("thinking_type", "clear_thinking"):
+            from code_puppy.model_utils import supports_glm_thinking
+
+            if supports_glm_thinking(underlying_name):
+                return True
+        if setting == "glm_reasoning_effort":
+            from code_puppy.model_utils import supports_glm_reasoning_effort
+
+            if supports_glm_reasoning_effort(underlying_name):
+                return True
         if setting in ("reasoning_context", "reasoning_mode"):
-            underlying_name = str(model_config.get("name", "")).lower()
+            underlying_name = underlying_name.lower()
             if "gpt-5.6" in underlying_name:
                 return True
 
@@ -784,14 +801,19 @@ def model_supports_setting(
         supported_settings = model_config.get("supported_settings")
 
         if supported_settings is None:
-            # Default: assume common settings are supported for backwards compatibility
-            # For Anthropic/Claude models, include extended thinking settings
-            if model_name.startswith("claude-") or model_name.startswith("anthropic-"):
+            # Infer family defaults from alias, provider type, and underlying
+            # model ID so friendly aliases behave like canonical model names.
+            if uses_anthropic_messages_api(model_name, model_config):
                 base = ["temperature", "extended_thinking", "budget_tokens"]
                 from code_puppy.model_utils import supports_adaptive_thinking
 
-                if supports_adaptive_thinking(model_name):
+                if supports_adaptive_thinking(model_name, underlying_name):
                     base.append("effort")
+                return setting in base
+            if gpt_5_minor is not None:
+                base = ["reasoning_effort", "summary", "verbosity"]
+                if gpt_5_minor >= 6:
+                    base.extend(("reasoning_context", "reasoning_mode"))
                 return setting in base
             return setting in ["temperature", "seed"]
 
@@ -1096,6 +1118,9 @@ def get_all_model_settings(model_name: str) -> dict:
                     continue
                 settings[setting_name] = parse_config_scalar(val)
 
+    from code_puppy.model_setting_specs import get_scoped_model_settings
+
+    settings.update(get_scoped_model_settings(model_name))
     return settings
 
 
@@ -1205,6 +1230,14 @@ def get_effective_model_settings(model_name: Optional[str] = None) -> dict:
             else:
                 effective_settings[setting_name] = value
 
+    from code_puppy.model_setting_specs import get_scoped_model_settings
+
+    # Scoped settings were already validated and capability-filtered against
+    # the exact catalog snapshot used to construct the agent. Restore any that
+    # a fresh/plugin-supplied catalog lookup discarded, while preserving
+    # conversions (such as integer seed coercion) performed above.
+    for setting_name, value in get_scoped_model_settings(model_name).items():
+        effective_settings.setdefault(setting_name, value)
     return effective_settings
 
 

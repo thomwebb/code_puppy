@@ -12,6 +12,7 @@ hook; see :func:`code_puppy.callbacks.on_wrap_pydantic_agent`.
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -40,6 +41,12 @@ from code_puppy.config import (
 from code_puppy.mcp_ import get_mcp_manager
 from code_puppy.messaging import emit_error, emit_info, emit_warning
 from code_puppy.model_factory import ModelFactory, make_model_settings
+from code_puppy.model_setting_specs import (
+    ModelSettingsCapabilityError,
+    model_settings_scope,
+    resolve_model_settings_overrides,
+    validate_model_settings,
+)
 
 _AGENT_RULE_FILES = ("AGENTS.md", "AGENT.md", "agents.md", "agent.md")
 _CODE_PUPPY_DIR = ".code_puppy"
@@ -401,6 +408,7 @@ def load_model_with_fallback(
     message_group: str,
     agent_name: Optional[str] = None,
     conversation_scope: Optional[str] = None,
+    model_settings_overrides: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, str]:
     """Load the requested model, or fall back to a sensible alternative.
 
@@ -420,15 +428,31 @@ def load_model_with_fallback(
     session. Leave ``None`` for the single main-agent-per-process case
     (default; unaffected by this parameter).
     """
+    setting_source = f"agent {agent_name or 'main'} model_settings"
+    if model_settings_overrides:
+        validate_model_settings(model_settings_overrides, source=setting_source)
+
     try:
-        model = ModelFactory.get_model(requested_model_name, models_config)
+        requested_settings = resolve_model_settings_overrides(
+            requested_model_name,
+            model_settings_overrides,
+            models_config=models_config,
+            source=setting_source,
+        )
+        with model_settings_scope(
+            requested_model_name,
+            requested_settings,
+            raw_settings=model_settings_overrides,
+            models_config=models_config,
+        ):
+            model = ModelFactory.get_model(requested_model_name, models_config)
         if model is None:
             raise ValueError(
                 f"Model '{requested_model_name}' was found in configuration but "
                 f"could not be instantiated (handler returned None)."
             )
         return model, requested_model_name
-    except ValueError as exc:
+    except (ModelSettingsCapabilityError, ValueError) as exc:
         available = list(models_config.keys())
         available_str = (
             ", ".join(sorted(available)) if available else "no configured models"
@@ -476,21 +500,48 @@ def load_model_with_fallback(
             if candidate not in candidates:
                 candidates.append(candidate)
 
+        candidate_errors: List[str] = []
         for candidate in candidates:
             if not candidate or candidate == requested_model_name:
                 continue
             try:
-                model = ModelFactory.get_model(candidate, models_config)
+                candidate_settings = resolve_model_settings_overrides(
+                    candidate,
+                    model_settings_overrides,
+                    models_config=models_config,
+                    source=setting_source,
+                )
+                with model_settings_scope(
+                    candidate,
+                    candidate_settings,
+                    raw_settings=model_settings_overrides,
+                    models_config=models_config,
+                ):
+                    model = ModelFactory.get_model(candidate, models_config)
+                if model is None:
+                    candidate_errors.append(
+                        f"{candidate}: initialization returned None"
+                    )
+                    continue
                 emit_info(
                     f"Using fallback model: {candidate}", message_group=message_group
                 )
                 return model, candidate
-            except ValueError:
+            except ModelSettingsCapabilityError as candidate_exc:
+                candidate_errors.append(f"{candidate}: {candidate_exc}")
+                continue
+            except ValueError as candidate_exc:
+                candidate_errors.append(f"{candidate}: {candidate_exc}")
                 continue
 
+        diagnostic_suffix = (
+            f" Candidate failures: {'; '.join(candidate_errors)}."
+            if candidate_errors
+            else ""
+        )
         friendly = (
             "No valid model could be loaded. Update the model configuration or "
-            "set a valid model with `config set`."
+            f"set a valid model with `config set`.{diagnostic_suffix}"
         )
         emit_error(friendly, message_group=message_group)
         raise ValueError(friendly) from exc
@@ -559,7 +610,11 @@ database or production mutations, or other actions without a clear rollback.
 
 
 def _is_gpt_5_6_family(model_name: Optional[str]) -> bool:
-    return bool(model_name and "gpt-5.6" in model_name.lower())
+    if not model_name:
+        return False
+    model_config = ModelFactory.load_config().get(model_name, {})
+    identity = f"{model_name} {model_config.get('name', '')}".lower()
+    return "gpt-5.6" in identity
 
 
 def _agent_exposes_tool(agent: Any, tool_name: str) -> bool:
@@ -569,7 +624,11 @@ def _agent_exposes_tool(agent: Any, tool_name: str) -> bool:
         return False
 
 
-def _assemble_instructions(agent: Any, resolved_model_name: str) -> str:
+def _assemble_instructions(
+    agent: Any,
+    resolved_model_name: str,
+    resolved_model_settings: Optional[Dict[str, Any]] = None,
+) -> str:
     """Compose full system prompt + puppy rules + extended-thinking note."""
     from code_puppy.model_utils import prepare_prompt_for_model
     from code_puppy.tools import (
@@ -582,7 +641,10 @@ def _assemble_instructions(agent: Any, resolved_model_name: str) -> str:
     if puppy_rules:
         instructions += f"\n{puppy_rules}"
 
-    if has_extended_thinking_active(resolved_model_name):
+    if has_extended_thinking_active(
+        resolved_model_name,
+        settings_overrides=resolved_model_settings,
+    ):
         instructions += EXTENDED_THINKING_PROMPT_NOTE
 
     if _is_gpt_5_6_family(resolved_model_name):
@@ -591,8 +653,11 @@ def _assemble_instructions(agent: Any, resolved_model_name: str) -> str:
         if _agent_exposes_tool(agent, "agent_run_shell_command"):
             instructions += _GPT_5_6_RUN_SHELL_COMMAND_GUARD_TEXT
 
+    # Preserve the fully assembled prompt before provider plugins replace the
+    # pydantic-ai instruction string (Claude Code relocates it on turn one).
+    agent._resolved_system_prompt = instructions
     prepared = prepare_prompt_for_model(
-        agent.get_model_name(), instructions, "", prepend_system_to_user=False
+        resolved_model_name, instructions, "", prepend_system_to_user=False
     )
     return prepared.instructions
 
@@ -626,86 +691,110 @@ def build_pydantic_agent(
     message_group = message_group or str(uuid.uuid4())
 
     models_config = ModelFactory.load_config()
+    raw_model_settings = agent.get_model_settings_overrides()
     model, resolved_model_name = load_model_with_fallback(
         agent.get_model_name(),
         models_config,
         message_group,
         agent_name=getattr(agent, "name", None),
+        model_settings_overrides=raw_model_settings,
     )
-    instructions = _assemble_instructions(agent, resolved_model_name)
-    mcp_servers = load_mcp_servers(agent_name=getattr(agent, "name", None))
-    model_settings = make_model_settings(
+    resolved_model_settings = resolve_model_settings_overrides(
         resolved_model_name,
-        overrides=agent.get_model_settings_overrides(),
+        raw_model_settings,
+        models_config=models_config,
+        source=f"agent {getattr(agent, 'name', 'main')} model_settings",
     )
-    history_processor = make_history_processor(agent)
-    steer_processor = make_steer_history_processor(agent)
+    agent._resolved_model_settings_overrides = resolved_model_settings
+    agent._raw_model_settings_overrides = deepcopy(dict(raw_model_settings or {}))
+    agent._model_settings_models_config = deepcopy(models_config)
+    with model_settings_scope(
+        resolved_model_name,
+        resolved_model_settings,
+        raw_settings=raw_model_settings,
+        models_config=models_config,
+    ):
+        instructions = _assemble_instructions(
+            agent,
+            resolved_model_name,
+            resolved_model_settings,
+        )
+        mcp_servers = load_mcp_servers(agent_name=getattr(agent, "name", None))
+        model_settings = make_model_settings(
+            resolved_model_name,
+            overrides=resolved_model_settings,
+            models_config=models_config,
+        )
+        history_processor = make_history_processor(agent)
+        steer_processor = make_steer_history_processor(agent)
 
-    def _new_pydantic_agent(toolsets: List[Any]) -> PydanticAgent:
-        return PydanticAgent(
-            model=model,
-            instructions=instructions,
-            output_type=output_type,
-            retries=3,
-            toolsets=toolsets,
-            # Order matters: compaction first (may trim history to fit
-            # context), THEN steer injection (a fresh steer must not be
-            # compacted away). ProcessHistory capabilities apply in
-            # registration order (replaces the deprecated
-            # `history_processors=` kwarg, removed in pydantic-ai v2).
-            # ToolOutputLimits reduces oversized tool returns on a different
-            # hook (after_tool_execute), so its position is inert; the
-            # response clamp runs before_model_request and sits LAST so it
-            # sees the final, steer-injected history.
-            capabilities=[
-                *build_tool_output_limits(),
-                ProcessHistory(history_processor),
-                ProcessHistory(steer_processor),
-                build_response_clamp(),
-            ],
-            model_settings=model_settings,
+        def _new_pydantic_agent(toolsets: List[Any]) -> PydanticAgent:
+            return PydanticAgent(
+                model=model,
+                instructions=instructions,
+                output_type=output_type,
+                retries=3,
+                toolsets=toolsets,
+                # Order matters: compaction first (may trim history to fit
+                # context), THEN steer injection (a fresh steer must not be
+                # compacted away). ProcessHistory capabilities apply in
+                # registration order (replaces the deprecated
+                # `history_processors=` kwarg, removed in pydantic-ai v2).
+                # ToolOutputLimits reduces oversized tool returns on a different
+                # hook (after_tool_execute), so its position is inert; the
+                # response clamp runs before_model_request and sits LAST so it
+                # sees the final, steer-injected history.
+                capabilities=[
+                    *build_tool_output_limits(),
+                    ProcessHistory(history_processor),
+                    ProcessHistory(steer_processor),
+                    build_response_clamp(),
+                ],
+                model_settings=model_settings,
+            )
+
+        # Pass 1: build with empty toolsets so we can see what pydantic-ai + our
+        # tool registry actually produced, and filter MCP to avoid name clashes.
+        probe_agent = _new_pydantic_agent(toolsets=[])
+        agent_tools = agent.get_available_tools()
+        logical_agent_name = getattr(agent, "name", None) or agent.__class__.__name__
+        register_tools_for_agent(
+            probe_agent,
+            agent_tools,
+            model_name=resolved_model_name,
+            agent_name=logical_agent_name,
+            settings_overrides=resolved_model_settings,
         )
 
-    # Pass 1: build with empty toolsets so we can see what pydantic-ai + our
-    # tool registry actually produced, and filter MCP to avoid name clashes.
-    probe_agent = _new_pydantic_agent(toolsets=[])
-    agent_tools = agent.get_available_tools()
-    logical_agent_name = getattr(agent, "name", None) or agent.__class__.__name__
-    register_tools_for_agent(
-        probe_agent,
-        agent_tools,
-        model_name=resolved_model_name,
-        agent_name=logical_agent_name,
-    )
+        existing_tool_names: Set[str] = set(getattr(probe_agent, "_tools", {}) or {})
+        filtered_mcp_servers = filter_conflicting_mcp_tools(
+            mcp_servers, existing_tool_names
+        )
 
-    existing_tool_names: Set[str] = set(getattr(probe_agent, "_tools", {}) or {})
-    filtered_mcp_servers = filter_conflicting_mcp_tools(
-        mcp_servers, existing_tool_names
-    )
+        # Pass 2: real build. MCP servers always go in the constructor; plugins
+        # (e.g. DBOS) may swap them at run time via ``agent_run_context``.
+        final_pydantic = _new_pydantic_agent(toolsets=filtered_mcp_servers)
+        register_tools_for_agent(
+            final_pydantic,
+            agent_tools,
+            model_name=resolved_model_name,
+            agent_name=logical_agent_name,
+            settings_overrides=resolved_model_settings,
+        )
 
-    # Pass 2: real build. MCP servers always go in the constructor; plugins
-    # (e.g. DBOS) may swap them at run time via ``agent_run_context``.
-    final_pydantic = _new_pydantic_agent(toolsets=filtered_mcp_servers)
-    register_tools_for_agent(
-        final_pydantic,
-        agent_tools,
-        model_name=resolved_model_name,
-        agent_name=logical_agent_name,
-    )
+        agent.cur_model = model
+        agent._last_model_name = resolved_model_name
+        agent._mcp_servers = filtered_mcp_servers
 
-    agent.cur_model = model
-    agent._last_model_name = resolved_model_name
-    agent._mcp_servers = filtered_mcp_servers
-
-    wrapped = on_wrap_pydantic_agent(
-        agent,
-        final_pydantic,
-        event_stream_handler=event_stream_handler,
-        message_group=message_group,
-        kind="main",
-    )
-    agent.pydantic_agent = wrapped
-    agent._code_generation_agent = wrapped
+        wrapped = on_wrap_pydantic_agent(
+            agent,
+            final_pydantic,
+            event_stream_handler=event_stream_handler,
+            message_group=message_group,
+            kind="main",
+        )
+        agent.pydantic_agent = wrapped
+        agent._code_generation_agent = wrapped
     return wrapped
 
 
@@ -725,26 +814,44 @@ def build_tool_probe_for_agent(agent: Any) -> Optional[Any]:
 
     try:
         models_config = ModelFactory.load_config()
+        raw_model_settings = agent.get_model_settings_overrides()
         model, resolved_model_name = load_model_with_fallback(
             agent.get_model_name() or "",
             models_config,
             message_group=str(uuid.uuid4()),
             agent_name=getattr(agent, "name", None),
+            model_settings_overrides=raw_model_settings,
+        )
+        resolved_model_settings = resolve_model_settings_overrides(
+            resolved_model_name,
+            raw_model_settings,
+            models_config=models_config,
+            source=f"agent {getattr(agent, 'name', 'main')} model_settings",
         )
     except Exception:
         return None
 
     try:
-        probe = PydanticAgent(
-            model=model,
-            instructions="",
-            output_type=str,
-            retries=1,
-            toolsets=[],
-        )
-        register_tools_for_agent(
-            probe, agent.get_available_tools(), model_name=resolved_model_name
-        )
+        with model_settings_scope(
+            resolved_model_name,
+            resolved_model_settings,
+            raw_settings=raw_model_settings,
+            models_config=models_config,
+        ):
+            probe = PydanticAgent(
+                model=model,
+                instructions="",
+                output_type=str,
+                retries=1,
+                toolsets=[],
+            )
+            register_tools_for_agent(
+                probe,
+                agent.get_available_tools(),
+                model_name=resolved_model_name,
+                agent_name=getattr(agent, "name", None),
+                settings_overrides=resolved_model_settings,
+            )
     except Exception:
         return None
     return probe

@@ -177,7 +177,9 @@ async def _invoke_with_dead_pin(
         p(
             patch(
                 "code_puppy.model_factory.ModelFactory.load_config",
-                return_value={"global-default-model": {}},
+                return_value={
+                    "global-default-model": {"supported_settings": ["reasoning_effort"]}
+                },
             )
         )
         p(
@@ -273,6 +275,9 @@ class TestPinnedModelFallback:
         mock_make_settings.assert_called_once_with(
             "global-default-model",
             overrides=overrides,
+            models_config={
+                "global-default-model": {"supported_settings": ["reasoning_effort"]}
+            },
         )
 
     @pytest.mark.asyncio

@@ -144,6 +144,27 @@ class TestRegisterToolsForAgent:
         mock_warn.assert_called()
 
     @patch("code_puppy.tools._load_plugin_tools")
+    @patch("code_puppy.tools.has_extended_thinking_active", return_value=True)
+    def test_extended_thinking_removes_redundant_reasoning_tool(
+        self, mock_ext, mock_load
+    ):
+        from code_puppy.tools import register_tools_for_agent
+
+        agent = MagicMock()
+        register_tools_for_agent(
+            agent,
+            ["agent_share_your_reasoning"],
+            model_name="friendly-claude",
+            settings_overrides={"extended_thinking": "enabled"},
+        )
+
+        agent.tool.assert_not_called()
+        mock_ext.assert_called_once_with(
+            "friendly-claude",
+            settings_overrides={"extended_thinking": "enabled"},
+        )
+
+    @patch("code_puppy.tools._load_plugin_tools")
     @patch("code_puppy.tools.has_extended_thinking_active", return_value=False)
     def test_register_legacy_reasoning_tool(self, mock_ext, mock_load):
         from code_puppy.tools import register_tools_for_agent

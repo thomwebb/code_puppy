@@ -310,6 +310,7 @@ async def _invoke_agent_impl(
             # Resolve the effective model through the agent so precedence lives
             # in one place: runtime override -> pinned model -> global default.
             requested_model_name = agent_config.get_model_name()
+            raw_model_settings = agent_config.get_model_settings_overrides()
             models_config = ModelFactory.load_config()
 
             if not requested_model_name:
@@ -321,9 +322,29 @@ async def _invoke_agent_impl(
             # different contract — a bad one stays a hard per-call failure.
             from code_puppy.agents._builder import load_model_with_fallback
 
+            from code_puppy.model_setting_specs import (
+                ModelSettingsValidationError,
+                model_settings_scope,
+                resolve_model_settings_overrides,
+            )
+
             if model_name:
                 try:
-                    model = ModelFactory.get_model(requested_model_name, models_config)
+                    resolved_model_settings = resolve_model_settings_overrides(
+                        requested_model_name,
+                        raw_model_settings,
+                        models_config=models_config,
+                        source=f"agent {agent_name} model_settings",
+                    )
+                    with model_settings_scope(
+                        requested_model_name,
+                        resolved_model_settings,
+                        raw_settings=raw_model_settings,
+                        models_config=models_config,
+                    ):
+                        model = ModelFactory.get_model(
+                            requested_model_name, models_config
+                        )
                     if model is None:
                         raise ValueError(
                             f"Model '{requested_model_name}' is configured but "
@@ -331,6 +352,8 @@ async def _invoke_agent_impl(
                             "provider availability, and usage limits for that "
                             "model."
                         )
+                except ModelSettingsValidationError:
+                    raise
                 except ValueError as exc:
                     available = list(models_config.keys())
                     available_str = (
@@ -355,86 +378,119 @@ async def _invoke_agent_impl(
                     # conversations stay separate, and nested A→B→C invocations
                     # share one id so "once per conversation" holds tree-wide.
                     conversation_scope=get_conversation_root_id(),
+                    model_settings_overrides=raw_model_settings,
                 )
 
-            # Create a temporary agent instance to avoid interfering with current agent state
-            instructions = agent_config.get_full_system_prompt()
-            instructions += f"\n\n{_subagent_identity_prompt(agent_name)}"
-
-            # AGENTS.md deliberately NOT injected into sub-agents: those are
-            # user-facing steering for the MAIN agent and would create recursion
-            # traps (e.g. "always invoke xyz" makes xyz invoke itself).
-
-            # NOTE: load_prompt fragments are already baked into get_full_system_prompt
-            # via BaseAgent — appending again would double-inject them.
-            from code_puppy.model_utils import prepare_prompt_for_model
-
-            # Handle claude-code models: swap instructions, and prepend system prompt only on first message
-            prepared = prepare_prompt_for_model(
+            resolved_model_settings = resolve_model_settings_overrides(
                 effective_model_name,
-                instructions,
-                prompt,
-                prepend_system_to_user=is_new_session,  # Only prepend on first message
-            )
-            instructions = prepared.instructions
-            prompt = prepared.user_prompt
-
-            model_settings = make_model_settings(
-                effective_model_name,
-                overrides=agent_config.get_model_settings_overrides(),
+                raw_model_settings,
+                models_config=models_config,
+                source=f"agent {agent_name} model_settings",
             )
 
-            # Warm up bound MCP servers with the ASYNC autostart variant: the run
-            # is wrapped in create_task, and the sync variant races pydantic-ai's
-            # cancel-scope entry ("Attempted to exit a cancel scope..."). Awaiting
-            # readiness ensures the lifecycle task owns scopes before handoff.
-            from code_puppy.agents._builder import autostart_bound_servers_async
-            from code_puppy.config import get_value
-            from code_puppy.mcp_ import get_mcp_manager
-
-            mcp_servers = []
-            mcp_disabled = get_value("disable_mcp_servers")
-            if not (
-                mcp_disabled and str(mcp_disabled).lower() in ("1", "true", "yes", "on")
+            with model_settings_scope(
+                effective_model_name,
+                resolved_model_settings,
+                raw_settings=raw_model_settings,
+                models_config=models_config,
             ):
-                manager = get_mcp_manager()
-                bound_agent_name = getattr(agent_config, "name", None)
-                if bound_agent_name:
-                    await autostart_bound_servers_async(manager, bound_agent_name)
-                mcp_servers = manager.get_servers_for_agent(agent_name=bound_agent_name)
+                # Create a temporary agent instance to avoid interfering with current agent state
+                instructions = agent_config.get_full_system_prompt()
+                instructions += f"\n\n{_subagent_identity_prompt(agent_name)}"
 
-            from code_puppy.agents._compaction import make_history_processor
+                from code_puppy.tools import (
+                    EXTENDED_THINKING_PROMPT_NOTE,
+                    has_extended_thinking_active,
+                )
 
-            # Build the pydantic-ai agent. MCP servers always included; plugins
-            # (e.g. DBOS) may swap them via the agent_run_context hook.
-            temp_agent = Agent(
-                model=model,
-                instructions=instructions,
-                output_type=str,
-                retries=3,
-                toolsets=mcp_servers,
-                # ProcessHistory capability replaces the deprecated
-                # `history_processors=` kwarg (removed in pydantic-ai v2).
-                capabilities=[ProcessHistory(make_history_processor(agent_config))],
-                model_settings=model_settings,
-            )
+                if has_extended_thinking_active(
+                    effective_model_name,
+                    settings_overrides=resolved_model_settings,
+                ):
+                    instructions += EXTENDED_THINKING_PROMPT_NOTE
 
-            # Register the tools that the agent needs
-            from code_puppy.tools import register_tools_for_agent
+                # AGENTS.md deliberately NOT injected into sub-agents: those are
+                # user-facing steering for the MAIN agent and would create recursion
+                # traps (e.g. "always invoke xyz" makes xyz invoke itself).
 
-            agent_tools = agent_config.get_available_tools()
-            register_tools_for_agent(
-                temp_agent, agent_tools, model_name=effective_model_name
-            )
+                # NOTE: load_prompt fragments are already baked into get_full_system_prompt
+                # via BaseAgent — appending again would double-inject them.
+                from code_puppy.model_utils import prepare_prompt_for_model
 
-            # Allow plugins to wrap the agent (e.g. DBOS durable-exec wrapper).
-            temp_agent = on_wrap_pydantic_agent(
-                agent_config,
-                temp_agent,
-                event_stream_handler=None,
-                message_group=group_id,
-                kind="subagent",
-            )
+                # Handle claude-code models: swap instructions, and prepend system prompt only on first message
+                prepared = prepare_prompt_for_model(
+                    effective_model_name,
+                    instructions,
+                    prompt,
+                    prepend_system_to_user=is_new_session,  # Only prepend on first message
+                )
+                instructions = prepared.instructions
+                prompt = prepared.user_prompt
+
+                model_settings = make_model_settings(
+                    effective_model_name,
+                    overrides=resolved_model_settings,
+                    models_config=models_config,
+                )
+
+                # Warm up bound MCP servers with the ASYNC autostart variant: the run
+                # is wrapped in create_task, and the sync variant races pydantic-ai's
+                # cancel-scope entry ("Attempted to exit a cancel scope..."). Awaiting
+                # readiness ensures the lifecycle task owns scopes before handoff.
+                from code_puppy.agents._builder import autostart_bound_servers_async
+                from code_puppy.config import get_value
+                from code_puppy.mcp_ import get_mcp_manager
+
+                mcp_servers = []
+                mcp_disabled = get_value("disable_mcp_servers")
+                if not (
+                    mcp_disabled
+                    and str(mcp_disabled).lower() in ("1", "true", "yes", "on")
+                ):
+                    manager = get_mcp_manager()
+                    bound_agent_name = getattr(agent_config, "name", None)
+                    if bound_agent_name:
+                        await autostart_bound_servers_async(manager, bound_agent_name)
+                    mcp_servers = manager.get_servers_for_agent(
+                        agent_name=bound_agent_name
+                    )
+
+                from code_puppy.agents._compaction import make_history_processor
+
+                # Build the pydantic-ai agent. MCP servers always included; plugins
+                # (e.g. DBOS) may swap them via the agent_run_context hook.
+                temp_agent = Agent(
+                    model=model,
+                    instructions=instructions,
+                    output_type=str,
+                    retries=3,
+                    toolsets=mcp_servers,
+                    # ProcessHistory capability replaces the deprecated
+                    # `history_processors=` kwarg (removed in pydantic-ai v2).
+                    capabilities=[ProcessHistory(make_history_processor(agent_config))],
+                    model_settings=model_settings,
+                )
+
+                # Register the tools that the agent needs
+                from code_puppy.tools import register_tools_for_agent
+
+                agent_tools = agent_config.get_available_tools()
+                register_tools_for_agent(
+                    temp_agent,
+                    agent_tools,
+                    model_name=effective_model_name,
+                    agent_name=agent_name,
+                    settings_overrides=resolved_model_settings,
+                )
+
+                # Allow plugins to wrap the agent (e.g. DBOS durable-exec wrapper).
+                temp_agent = on_wrap_pydantic_agent(
+                    agent_config,
+                    temp_agent,
+                    event_stream_handler=None,
+                    message_group=group_id,
+                    kind="subagent",
+                )
 
             # subagent_stream_handler silences sub-agent output (aggregated
             # dashboard); high mode streams it inline via a StreamingTextDetector,
@@ -460,6 +516,12 @@ async def _invoke_agent_impl(
             with (
                 subagent_context(agent_name, effective_model_name),
                 executing_agent_context(agent_config),
+                model_settings_scope(
+                    effective_model_name,
+                    resolved_model_settings,
+                    raw_settings=raw_model_settings,
+                    models_config=models_config,
+                ),
             ):
                 run_ctxs = on_agent_run_context(
                     agent_config, temp_agent, group_id, mcp_servers

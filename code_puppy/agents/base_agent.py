@@ -71,6 +71,10 @@ class BaseAgent(ABC):
         self._code_generation_agent: Any = None
         self._last_model_name: Optional[str] = None
         self._runtime_model_name_override: Optional[str] = None
+        self._resolved_model_settings_overrides: Dict[str, Any] = {}
+        self._raw_model_settings_overrides: Dict[str, Any] = {}
+        self._model_settings_models_config: Dict[str, Any] = {}
+        self._resolved_system_prompt: Optional[str] = None
         self._runtime_system_prompt_additions: List[str] = []
         self._puppy_rules: Optional[str] = None
         self._mcp_servers: List[Any] = []

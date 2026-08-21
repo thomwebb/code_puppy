@@ -3,6 +3,7 @@ import logging
 import os
 import pathlib
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, Dict
 
 import httpx
@@ -74,6 +75,29 @@ def _custom_openai_uses_responses_api(
     )
 
 
+def model_uses_openai_responses_api(
+    model_name: str, model_config: Mapping[str, Any]
+) -> bool:
+    """Return whether a configured model uses OpenAI's Responses API."""
+    from code_puppy.model_setting_specs import model_identity
+
+    model_type = model_config.get("type")
+    if model_type in {"chatgpt_oauth", "codex", "custom_openai_responses"}:
+        return True
+    if model_type == "azure_foundry_openai":
+        return str(model_config.get("name", "")).startswith("gpt-5")
+    if model_type not in {"openai", "custom_openai"}:
+        return False
+    return bool(
+        model_config.get("api") == "responses"
+        or (
+            model_type == "openai"
+            and "codex" in model_identity(model_name, model_config)
+        )
+        or _custom_openai_uses_responses_api(model_name, dict(model_config))
+    )
+
+
 def _build_anthropic_beta_header(
     model_config: Dict,
     *,
@@ -121,18 +145,11 @@ def get_api_key(env_var_name: str) -> str | None:
     return os.environ.get(env_var_name)
 
 
-# Model types that use the Anthropic Messages API under the hood.
-# These all need Anthropic-specific settings (thinking, effort, etc.).
-_ANTHROPIC_MODEL_TYPES = frozenset(
-    {"anthropic", "aws_bedrock", "azure_foundry", "claude_code", "custom_anthropic"}
-)
+def is_anthropic_model(model_name: str, model_config: dict[str, Any]) -> bool:
+    """Check if a model uses the Anthropic API by normalized identity."""
+    from code_puppy.model_setting_specs import uses_anthropic_messages_api
 
-
-def _is_anthropic_model(model_name: str, model_config: dict[str, Any]) -> bool:
-    """Check if a model uses the Anthropic API (by name prefix or config type)."""
-    if model_name.startswith("claude-") or model_name.startswith("anthropic-"):
-        return True
-    return model_config.get("type") in _ANTHROPIC_MODEL_TYPES
+    return uses_anthropic_messages_api(model_name, model_config)
 
 
 def _thinking_tags_profile(
@@ -177,6 +194,8 @@ def make_model_settings(
     model_name: str,
     max_tokens: int | None = None,
     overrides: Mapping[str, Any] | None = None,
+    *,
+    models_config: Mapping[str, Any] | None = None,
 ) -> ModelSettings:
     """Create appropriate ModelSettings for a given model.
 
@@ -191,6 +210,8 @@ def make_model_settings(
             as: max(2048, min(15% of context_length, 65536))
         overrides: Optional agent-scoped settings. Supported values override
             global and per-model settings before provider-specific translation.
+        models_config: Optional model-catalog snapshot used for capability and
+            provider resolution. Passing it keeps nested/fallback models consistent.
 
     Returns:
         Appropriate ModelSettings subclass instance for the model.
@@ -203,20 +224,22 @@ def make_model_settings(
     model_settings_dict: dict = {}
 
     # Calculate max_tokens if not explicitly provided
-    models_config: dict[str, Any] = {}
-    model_config: dict[str, Any] = {}
+    catalog_provided = models_config is not None
+    models_config = dict(models_config or {})
+    model_config: dict[str, Any] = models_config.get(model_name, {})
     if max_tokens is None:
         # Load model config to get context length
         try:
-            models_config = ModelFactory.load_config()
-            model_config = models_config.get(model_name, {})
+            if not catalog_provided:
+                models_config = ModelFactory.load_config()
+                model_config = models_config.get(model_name, {})
             context_length = model_config.get("context_length", 128000)
         except Exception:
             # Fallback if config loading fails (e.g., in CI environments)
             context_length = 128000
         # min 2048, 15% of context, max 65536
         max_tokens = max(2048, min(int(0.15 * context_length), 65536))
-    elif not model_config:
+    elif not model_config and not catalog_provided:
         try:
             models_config = ModelFactory.load_config()
             model_config = models_config.get(model_name, {})
@@ -225,19 +248,17 @@ def make_model_settings(
 
     model_settings_dict["max_tokens"] = max_tokens
     effective_settings = get_effective_model_settings(model_name)
-    if overrides:
-        supported_overrides = {
-            setting: value
-            for setting, value in overrides.items()
-            if value is not None
-            and model_supports_setting(
-                model_name,
-                setting,
-                models_config=models_config or None,
-            )
-        }
-        effective_settings.update(supported_overrides)
-    model_settings_dict.update(effective_settings)
+
+    from code_puppy.model_setting_specs import resolve_model_settings_overrides
+
+    supported_overrides = resolve_model_settings_overrides(
+        model_name,
+        overrides,
+        models_config=models_config,
+        source="agent model_settings",
+    )
+    effective_settings.update(supported_overrides)
+    model_settings_dict.update(deepcopy(effective_settings))
 
     # Disable parallel tool calls when yolo_mode is off (sequential so user can review each call)
     if not get_yolo_mode():
@@ -250,8 +271,15 @@ def make_model_settings(
         supports_glm_thinking,
     )
 
-    if supports_glm_thinking(model_name):
-        glm_extra_body = model_settings_dict.get("extra_body") or {}
+    from code_puppy.model_setting_specs import model_identity
+
+    underlying_model_name = str(model_config.get("name", ""))
+    model_identity_text = model_identity(model_name, model_config)
+    glm_model_name = (
+        model_name if supports_glm_thinking(model_name) else underlying_model_name
+    )
+    if supports_glm_thinking(glm_model_name):
+        glm_extra_body = deepcopy(model_settings_dict.get("extra_body") or {})
         thinking_type = effective_settings.get("thinking_type", "enabled")
         clear_thinking = effective_settings.get("clear_thinking", False)
 
@@ -270,7 +298,9 @@ def make_model_settings(
 
         # Send reasoning_effort only when thinking is on: its mere presence can
         # make some proxies re-enable reasoning, overriding the disabled flag.
-        if thinking_type != "disabled" and supports_glm_reasoning_effort(model_name):
+        if thinking_type != "disabled" and supports_glm_reasoning_effort(
+            glm_model_name
+        ):
             glm_extra_body["reasoning_effort"] = effective_settings.get(
                 "glm_reasoning_effort", "max"
             )
@@ -322,34 +352,25 @@ def make_model_settings(
         # Plain OpenAIChatModelSettings without reasoning params.
         model_settings = OpenAIChatModelSettings(**model_settings_dict)
 
-    elif "gpt-5" in model_name:
+    elif "gpt-5" in model_identity_text:
         # Normalize legacy effort values (minimal->none, ultra->max)
         _EFFORT_ALIAS = {"minimal": "none", "ultra": "max"}
         effort = effective_settings.get("reasoning_effort", "medium")
         effort = _EFFORT_ALIAS.get(effort, effort)
         model_settings_dict["openai_reasoning_effort"] = effort
 
-        uses_responses_api = (
-            model_type == "chatgpt_oauth"
-            or model_type == "azure_foundry_openai"
-            or (model_type == "openai" and "codex" in model_name)
-            or (
-                model_type in _CUSTOM_OPENAI_MODEL_TYPES
-                and _custom_openai_uses_responses_api(model_name, model_config)
-            )
-        )
+        uses_responses_api = model_uses_openai_responses_api(model_name, model_config)
 
         if uses_responses_api:
             model_settings_dict["openai_reasoning_summary"] = effective_settings.get(
                 "summary", "auto"
             )
-            if "codex" not in model_name:
+            if "codex" not in model_identity_text:
                 model_settings_dict["openai_text_verbosity"] = effective_settings.get(
                     "verbosity", "medium"
                 )
 
-            underlying_name = str(model_config.get("name", "")).lower()
-            is_gpt_5_6 = "gpt-5.6" in model_name.lower() or "gpt-5.6" in underlying_name
+            is_gpt_5_6 = "gpt-5.6" in model_identity_text
             if is_gpt_5_6:
                 # pydantic-ai 2.31.0 HAS openai_reasoning_mode/context settings,
                 # but they're gated on profile flags
@@ -364,7 +385,7 @@ def make_model_settings(
                     "context": effective_settings.get("reasoning_context", "all_turns"),
                     "mode": effective_settings.get("reasoning_mode", "standard"),
                 }
-                extra_body = dict(model_settings_dict.get("extra_body") or {})
+                extra_body = deepcopy(model_settings_dict.get("extra_body") or {})
                 extra_body["reasoning"] = reasoning
                 model_settings_dict["extra_body"] = extra_body
                 model_settings_dict.pop("reasoning_context", None)
@@ -374,12 +395,12 @@ def make_model_settings(
         else:
             # Chat Completions models don't support configurable reasoning summaries.
             # Keep the old verbosity injection path for non-Responses GPT-5 models.
-            if "codex" not in model_name:
-                model_settings_dict["extra_body"] = {
-                    "verbosity": effective_settings.get("verbosity", "medium")
-                }
+            if "codex" not in model_identity_text:
+                extra_body = deepcopy(model_settings_dict.get("extra_body") or {})
+                extra_body["verbosity"] = effective_settings.get("verbosity", "medium")
+                model_settings_dict["extra_body"] = extra_body
             model_settings = OpenAIChatModelSettings(**model_settings_dict)
-    elif _is_anthropic_model(model_name, model_config):
+    elif is_anthropic_model(model_name, model_config):
         from code_puppy.model_utils import (
             anthropic_disallows_sampling_settings,
             get_default_extended_thinking,
@@ -432,12 +453,16 @@ def make_model_settings(
         if (
             thinking_payload is not None
             and thinking_payload.get("type") == "adaptive"
-            and model_supports_setting(model_name, "effort")
+            and model_supports_setting(
+                model_name,
+                "effort",
+                models_config=models_config,
+            )
         ):
             effort = effective_settings.get(
                 "effort", model_config.get("default_effort", "high")
             )
-            extra_body = model_settings_dict.get("extra_body") or {}
+            extra_body = deepcopy(model_settings_dict.get("extra_body") or {})
             extra_body["output_config"] = {"effort": effort}
             model_settings_dict["extra_body"] = extra_body
 
@@ -459,7 +484,11 @@ def make_model_settings(
         model_settings = AnthropicModelSettings(**model_settings_dict)
 
     # Apply thinking defaults if the model supports them
-    if model_supports_setting(model_name, "thinking_level"):
+    if model_supports_setting(
+        model_name,
+        "thinking_level",
+        models_config=models_config,
+    ):
         # Defaults: thinking_enabled=True, thinking_level="low"
         if "thinking_enabled" not in model_settings_dict:
             model_settings_dict["thinking_enabled"] = True
@@ -474,7 +503,7 @@ def make_model_settings(
 
     custom_params = get_custom_model_settings(model_name)
     if custom_params:
-        extra_body = dict(model_settings.get("extra_body") or {})
+        extra_body = deepcopy(model_settings.get("extra_body") or {})
         for dotted_key, value in custom_params.items():
             _merge_dotted_key(extra_body, dotted_key, value)
         model_settings["extra_body"] = extra_body
@@ -724,16 +753,15 @@ class ModelFactory:
                 return None
 
             provider = make_openai_provider(provider_identity, api_key=api_key)
-            model = OpenAIChatModel(
+            if model_uses_openai_responses_api(model_name, model_config):
+                return OpenAIResponsesModel(
+                    model_name=model_config["name"], provider=provider
+                )
+            return OpenAIChatModel(
                 model_name=model_config["name"],
                 provider=provider,
                 profile=_thinking_tags_profile(model_name, model_config),
             )
-            if "codex" in model_name:
-                model = OpenAIResponsesModel(
-                    model_name=model_config["name"], provider=provider
-                )
-            return model
 
         elif model_type == "anthropic":
             api_key = get_api_key("ANTHROPIC_API_KEY")
@@ -896,7 +924,7 @@ class ModelFactory:
             if api_key:
                 provider_args["api_key"] = api_key
             provider = make_openai_provider(provider_identity, **provider_args)
-            if _custom_openai_uses_responses_api(model_name, model_config):
+            if model_uses_openai_responses_api(model_name, model_config):
                 return OpenAIResponsesModel(
                     model_name=model_config["name"], provider=provider
                 )
@@ -1052,15 +1080,35 @@ class ModelFactory:
             # Get the rotate_every parameter (default: 1)
             rotate_every = model_config.get("rotate_every", 1)
 
-            # Resolve each model name to an actual model instance
+            # Resolve each model name to an actual model instance and preserve
+            # child-specific request settings. Composite settings cannot be
+            # filtered against the wrapper: heterogeneous children differ.
+            from code_puppy.model_setting_specs import get_scoped_model_settings
+
             models = []
+            child_settings = []
             for name in model_names:
-                # Recursively get each model using the factory
-                model = ModelFactory.get_model(name, config)
-                models.append(model)
+                child_model = ModelFactory.get_model(name, config)
+                if child_model is None:
+                    raise ValueError(
+                        f"Round-robin model '{model_name}' child '{name}' "
+                        "could not be initialized."
+                    )
+                models.append(child_model)
+                child_settings.append(
+                    make_model_settings(
+                        name,
+                        overrides=get_scoped_model_settings(name),
+                        models_config=config,
+                    )
+                )
 
             # Create and return the round-robin model
-            return RoundRobinModel(*models, rotate_every=rotate_every)
+            return RoundRobinModel(
+                *models,
+                rotate_every=rotate_every,
+                per_model_settings=child_settings,
+            )
 
         else:
             # Check for plugin-registered model type handlers

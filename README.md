@@ -511,11 +511,20 @@ Create JSON files in your agents directory following this schema:
   `reasoning_effort`, `verbosity`, or `temperature`
 - **`tools_config`**: Tool configuration object
 
-Per-agent model settings override standard global and per-model values. Settings
-the selected model does not support are ignored, and provider-specific
-conversions are still applied before the request is sent. Low-level Custom
-params configured through `/model_settings` remain the final wire-level
-override.
+Per-agent model settings override standard global and per-model values. Known
+settings are validated when the agent is loaded; plugin-owned settings may use
+a string, finite number, or boolean. Use the normal setting types and ranges
+shown by `/model_settings` (for example, `reasoning_effort` accepts `none`,
+`low`, `medium`, `high`, `xhigh`, or `max`). Invalid values fail with the agent
+file and setting name instead of reaching the provider. Settings the selected
+model does not support are ignored. A recognized setting with a model-specific
+level the model cannot provide (for example `reasoning_effort: max`) makes that
+model unavailable, so normal fallback selection can try another configured
+model. If no candidate can honor the requested level, model resolution reports
+the mismatch instead of sending an invalid request.
+Provider-specific conversions are still applied before the request is sent.
+Low-level Custom params configured through `/model_settings` remain the final
+wire-level override.
 
 ## Available Tools
 

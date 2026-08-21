@@ -1,6 +1,7 @@
 """JSON-based agent configuration system."""
 
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -67,11 +68,16 @@ class JSONAgent(BaseAgent):
                 f"'system_prompt' must be a string or list in JSON agent config: {self.json_path}"
             )
 
-        if "model_settings" in self._config and not isinstance(
-            self._config["model_settings"], dict
-        ):
-            raise ValueError(
-                f"'model_settings' must be an object in JSON agent config: {self.json_path}"
+        if "model_settings" in self._config:
+            if not isinstance(self._config["model_settings"], dict):
+                raise ValueError(
+                    f"'model_settings' must be an object in JSON agent config: {self.json_path}"
+                )
+            from code_puppy.model_setting_specs import validate_model_settings
+
+            validate_model_settings(
+                self._config["model_settings"],
+                source=f"{self.json_path}: model_settings",
             )
 
         # mcp_servers: list[str] (shorthand, auto_start=True) or dict[str, dict]
@@ -180,7 +186,7 @@ class JSONAgent(BaseAgent):
 
     def get_model_settings_overrides(self) -> Dict[str, Any]:
         """Get model request-setting overrides from JSON config."""
-        return dict(self._config.get("model_settings", {}))
+        return deepcopy(self._config.get("model_settings", {}))
 
     def get_declared_mcp_bindings(self) -> Dict[str, Dict[str, Any]]:
         """Return MCP bindings declared in the JSON config, normalized.
